@@ -57,18 +57,19 @@ MANIFEST = {
 
 # ==============================================================================
 
+from importlib.abc import Loader
 from importlib.machinery import ModuleSpec
 import importlib.util
 import os
 import sys
-from typing import TYPE_CHECKING
+from typing import cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from types import ModuleType
+    from types import CodeType, ModuleType
 
 
-class Bundle:
+class Bundle(Loader):
     """
     Representation of a bundle. Each instance serves as meta path finder and
     module loader for a particular bundle script.
@@ -78,7 +79,7 @@ class Bundle:
     def install(
         cls,
         script: str,
-        manifest: dict[str, tuple[int, int]],
+        manifest: 'dict[str, tuple[int, int]]',
     ) -> 'Bundle':
         bundle = Bundle(script, manifest)
         for finder in sys.meta_path:
@@ -91,7 +92,7 @@ class Bundle:
     def __init__(
         self,
         script: str,
-        manifest: dict[str, tuple[int, int]],
+        manifest: 'dict[str, tuple[int, int]]',
     ) -> None:
         if len(script) == 0:
             raise ValueError('path to bundle script is empty')
@@ -107,7 +108,7 @@ class Bundle:
 
         self._script = script
         self._manifest = {intern(k): v for k, v in manifest.items()}
-        self._mod_bundle: None | str = None
+        self._mod_bundle: 'None | str' = None
 
     def __hash__(self) -> int:
         return hash(self._script) + hash(self._manifest)
@@ -140,13 +141,13 @@ class Bundle:
             data = file.read(length)
             assert len(data) == length
             # The source code for tsutsumu/bundle.py isn't a bytestring.
-            return data[1:-1] if key == self._mod_bundle else eval(data)
+            return data[1:-1] if key == self._mod_bundle else cast(bytes, eval(data))
 
     def _locate(
         self,
         fullname: str,
         paths: 'None | Sequence[str]' = None,
-    ) -> tuple[str, None | str]:
+    ) -> 'tuple[str, None | str]':
         if paths is None:
             prefixes = [os.path.join(
                 self._script,
@@ -173,19 +174,15 @@ class Bundle:
         fullname: str,
         path: 'None | Sequence[str]' = None,
         target: 'None | ModuleType' = None,
-    ) -> None | ModuleSpec:
+    ) -> 'None | ModuleSpec':
         try:
             fullpath, modpath = self._locate(fullname, path)
         except ImportError:
             return None
 
-        spec = ModuleSpec(
-            fullname,
-            self, # type: ignore[arg-type]
-            origin=fullpath,
-            is_package=bool(modpath)
-        )
+        spec = ModuleSpec(fullname, self, origin=fullpath, is_package=bool(modpath))
         if modpath:
+            assert spec.submodule_search_locations is not None
             spec.submodule_search_locations.append(modpath)
         return spec
 
@@ -194,12 +191,12 @@ class Bundle:
 
     def exec_module(self, module: 'ModuleType') -> None:
         assert module.__spec__ is not None, 'module must have spec'
-        exec(self.get_code(module.__spec__.name), module.__dict__)
+        exec(self.get_code(module.__spec__.name), module.__dict__) # type: ignore[misc]
 
     def is_package(self, fullname: str) -> bool:
         return self._locate(fullname)[1] is not None
 
-    def get_code(self, fullname: str):
+    def get_code(self, fullname: str) -> 'CodeType':
         fullpath = self.get_filename(fullname)
         source = importlib.util.decode_source(self[fullpath])
         return compile(source, fullpath, 'exec', dont_inherit=True)
@@ -243,6 +240,7 @@ class Bundle:
             fullpath = os.path.join(pkgdir, filename)
             spec = ModuleSpec(modname, self, origin=fullpath, is_package=bool(modpath))
             if modpath:
+                assert spec.submodule_search_locations is not None
                 spec.submodule_search_locations.append(modpath)
             module = importlib.util.module_from_spec(spec)
             setattr(module, '__file__', fullpath)
@@ -260,12 +258,16 @@ class Bundle:
             (tsutsumu_bundle, 'Bundle', None, Bundle),
             (Bundle, '__module__', '__main__', 'tsutsumu.bundle'),
         ):
-            if old is None and hasattr(obj, attr):
-                Bundle.warn(f'{obj} already has attribute {attr}')
-            elif old is not None and (actual := getattr(obj, attr, None)) != old:
-                Bundle.warn(f"{obj}.{attr} is {actual} instead of {old}")
+            if old is None:
+                if hasattr(obj, attr):
+                    Bundle.warn(f'{obj} already has attribute {attr}')
+                    continue
             else:
-                setattr(obj, attr, new)
+                actual: 'None | str' = getattr(obj, attr, None)
+                if actual != old:
+                    Bundle.warn(f"{obj}.{attr} is {actual} instead of {old}")
+                    continue
+            setattr(obj, attr, new)
 
     def add_to_manifest(
         self,
@@ -275,6 +277,7 @@ class Bundle:
         if tsutsumu.__file__ in self._manifest:
             Bundle.warn(f'manifest already includes "{tsutsumu.__file__}"')
         else:
+            assert tsutsumu.__file__ is not None
             self._manifest[tsutsumu.__file__] = (0, 0)
 
         if tsutsumu_bundle.__file__ in self._manifest:
@@ -287,6 +290,7 @@ class Bundle:
             start = content.find(hr, start + len(hr)) + len(hr)
             stop = content.find(hr, start)
 
+            assert tsutsumu_bundle.__file__ is not None
             self._mod_bundle = tsutsumu_bundle.__file__
             self._manifest[self._mod_bundle] = (start, stop - start)
 
