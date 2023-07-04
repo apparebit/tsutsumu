@@ -64,56 +64,54 @@ So how about bundling your Python modules?
 ## 2. Make a Bundle
 
 The only challenge in making a bundle is in selecting the right directories for
-inclusion. Right now, you need to list them as explicit directory arguments to
-Tsutsumu. For most Python tools and applications, that means bundling the Python
-code you are developing and all *runtime* dependencies, passing a distinct
-directory to Tsutsumu for each package in the bundle. Automating package
-selection based on a project's `pyproject.toml` is the obvious next step.
+inclusion. Right now, you need to list every package that should be included in
+the bundle as a separate directory argument to Tsutsumu. Alas, for most Python
+tools and applications, that's just the list of regular dependencies. While
+module-level tree-shaking might still be desirable, automating package selection
+based on a project's `pyproject.toml` is an obvious next step.
 
-When Tsutsumu traverses the root directories provided as arguments, it currently
-selects only a few textual formats for inclusion in the bundle. Notably, that
-includes plain text, Markdown, ReStructured Text, HTML, CSS, JavaScript, and
-Python. Out of those, Tsutsumu only executes Python code. The other files serve
-as resources. Adding support for Base85-encoded binary formats seems like a good
-idea, too.
+When Tsutsumu traverses provided directories, it currently limits itself to a
+few textual formats based on file extension. In particular, it includes plain
+text, Markdown, ReStructured Text, HTML, CSS, JavaScript, and most importantly
+Python sources. Out of these, Tsutsumu only knows how to execute Python code.
+The other files serve as resources. Adding support for Base85-encoded binary
+formats seems like another obvious next step.
 
 
 ## 3. The Workings of a Bundle
 
-Conveniently, Tsutsumu's source repository contains the `spam` package for
-illustrating the inner workings of Python module bundles. That package includes
-the `__main__` and `bacon` modules as well as a very stylish `ham.html` webpage.
-Let's turn that package into a bundle:
+This section is a hands-on exploration of Tsutsumu's inner workings. Its
+implementation is split across three modules:
+
+  * `tsutsumu.__main__` for the command line interface;
+  * `tsutsumu.maker` for generating bundles with the `BundleMaker` class;
+  * `tsutsumu.bundle` for running modules with the `Bundle` class.
+
+The `__main__` module isn't particularly interesting, so I focus on the latter
+two, starting with the bundle maker. Conveniently, Tsutsumu's source repository
+includes the `spam` package as an illustrative aid. In addition to its own
+`__init__` package module, `spam` contains two Python modules, `__main__` and
+`bacon` as well as a very stylish `ham.html` webpage. (Please do check it out
+🙄). Now, let's get started turning those files into a bundle.
 
 ```py
->>> import tsutsumu
->>> maker = tsutsumu.BundleMaker(['spam'])
+>>> import tsutsumu.maker
+>>> maker = tsutsumu.maker.BundleMaker(['spam'])
 >>> maker
 <tsutsumu-maker spam>
 >>>
 ```
 
-The bundle maker first scans the input directories for files to include in the
-bundle. For each such file, it yields a `Path` and a `str`. The former is the
-absolute, system-specific path for accessing the local file. The latter is the
-relative path from the root directory, using '/' as path separator. It serves as
-file name in the bundle script.
+The bundle maker ultimately needs to produce a Python script. To get there, the
+bundle maker processes data from file granularity, when including them in the
+bundle, down to character granularity, when tracking each file's offset from the
+start of the file and length. It also creates Python source code one dictionary
+key at a time, i.e., at line granularity. Since it's easy enough to format
+strings to form entire lines and, similarly, easy enough to break larger blobs
+into lines, most bundle maker methods are generators that yield lines. In fact,
+they yield lines of `bytes` (not `str`) that include newlines (just `\n`).
 
-Since the relative paths are platform-independent, let's check them out:
-
-```py
->>> files = list(sorted(maker.list_files(), key=lambda f: f[1]))
->>> for _, key in files:
-...     print(key)
-spam/__init__.py
-spam/__main__.py
-spam/bacon.py
->>>
-```
-
-Most bundle maker methods are generators that yield newline-terminated
-bytestrings with the source code of the bundle script. We could use a helper
-function that display those lines as text:
+The following function helps us print such binary lines:
 
 ```py
 >>> def show(lines):
@@ -123,85 +121,189 @@ function that display those lines as text:
 >>>
 ```
 
-The inner `print()` statement converts each line from `bytes` to `str`. Since
-each line already includes a line terminator, the `print()` statement also uses
-the empty string for `end`ing the line.
+It consumes all lines produced by a generator, decoding each line as UTF-8 and
+printing it without adding another newline, hence the `end` keyword argument.
+
+We won't get to `show()` right away, however, because the bundle maker doesn't
+just start yielding lines out of nowhere but instead starts by yielding paths to
+the bundled files. In fact, for each file, it yields an
+operating-system-specific `Path`—suitable for reading the file's contents from
+the local file system—as well as a relative `str` key with forward slashes—for
+identifying the file in the bundle's manifest. Here are bundle maker's keys for
+`spam`:
+
+```py
+>>> file_ordering = tsutsumu.maker.BundleMaker.file_ordering
+>>> files = list(sorted(maker.list_files(), key=file_ordering))
+>>> for _, key in files:
+...     print(key)
+...
+spam/__init__.py
+spam/__main__.py
+spam/bacon.py
+spam/ham.html
+>>>
+```
+
+Sure enough, bundle maker yields four files:
+
+  * `spam/__init__.py` with the `spam` package module;
+  * `spam/__main__.py` with the package's main entry point;
+  * `spam/bacon.poy` with the `spam.bacon` submodule;
+  * `spam/ham.html` as a package resource.
 
 
 ### 3.1 Layout of Bundled Files
 
-Tsutsumu represents the bundled files as a dictionary mapping file name strings
-to file content bytestrings. But instead of assigning that dictionary to a
-variable, which would force all modules into memory for the entire runtime of
-the script, it does not keep the `dict` around. In fact, it also places it on a
-false conditional branch:
+Now that we know which files to include in the bundle, we can turn to their
+layout in bundle scripts. The current format tries to reconcile two
+ contradictory requirements: First, the layout must be valid Python source code.
+That pretty much limits us to string literals for file names and contents.
+Furthermore, since the collection of file names and contents obviously forms a
+mapping, we might as well use a `dict` literal for the file data.
+
+Second, the code must not retain the bundled data. Otherwise, all bundled files
+are loaded into memory at startup and remain there for the duration of the
+application's runtime. Ideally, the Python runtime doesn't even instantiate the
+`dict` literal and just scans for its end. To facilitate that, the bundle script
+does not assign the `dict` literal to a variable and, on top of that, includes
+it only inside an `if False:` branch.
 
 ```py
->>> START = tsutsumu.maker._BUNDLE_START_IFFY
->>> START
-b'if False: {\n'
->>> show(START.splitlines(keepends=True))
+>>> show(tsutsumu.maker._BUNDLE_START_IFFY.splitlines(keepends=True))
 if False: {
 >>>
 ```
 
-Now we can emit the code for each file name, content pair:
+I don't know whether, for instance, CPython optimizes script parsing for this
+use case. I do know that Donald Knuth's TeX (which goes back to the late 1970s)
+does not parse conditional branches known to be false and instead scans
+subsequent tokens until it reaches the closest command sequence ending the
+branch.
+
+In any case, we next emit the dictionary contents as file name, content pairs
+for each bundled file. We start with `spam/__init__.py`:
 
 ```py
 >>> show(maker.emit_text_file(*files[0]))
 # ------------------------------------------------------------------------------
 "spam/__init__.py": b"print('spam/__init__.py')\n",
+>>>
+```
+
+As illustrated above, the file name or key is a `str` literal, whereas the file
+contents are a `bytes` literal. The latter is more appropriate for file contents
+because files store bytestrings, too. That means that bundle maker is yielding
+lines of bytestrings that contain string and bytestring literals both. Ooh...
+
+Let's process the other three files:
+
+```py
 >>> show(maker.emit_text_file(*files[1]))
 # ------------------------------------------------------------------------------
 "spam/__main__.py":
 b"""print('spam/__main__.py')
 import spam.bacon
+<BLANKLINE>
+print('also:', __file__)
 """,
 >>> show(maker.emit_text_file(*files[2]))
 # ------------------------------------------------------------------------------
 "spam/bacon.py": b"print('spam/bacon.py')\n",
+>>> show(maker.emit_text_file(*files[3]))
+# ------------------------------------------------------------------------------
+"spam/ham.html":
+b"""<!doctype html>
+<html lang=en>
+<meta charset=utf-8>
+<title>Ham?</title>
+<style>
+* {
+    margin: 0;
+    padding: 0;
+}
+html {
+    height: 100%;
+}
+body {
+    min-height: 100%;
+    display: grid;
+    justify-content: center;
+    align-content: center;
+}
+p {
+    font-family: system-ui, sans-serif;
+    font-size: calc(32vmin + 4vmax);
+    font-weight: bolder;
+}
+</style>
+<p>Ham!
+""",
 >>>
 ```
 
-Having emitted all bundled files, we can close the dictionary literal.
+Now we can close the dictionary again:
 
 ```py
->>> tsutsumu.maker._BUNDLE_STOP
-b'}\n\n'
+>>> show(tsutsumu.maker._BUNDLE_STOP.splitlines(keepends=True))
+}
+<BLANKLINE>
 >>>
 ```
 
 
 ### 3.2 A Bundle's Manifest: Offsets and Lengths
 
-We have included the bundled files in the bundle script. They are formatted as a
-Python `dict` literal so that the script remains parseable. But how do we
-actually access the bundled files. While emitting each file entry, the bundle
-maker was recording the offsets and lengths of the bytestring for each file.
+A bundle's files are encoded as a `dict` literal by design—so that the script
+parses—but are *not* assigned to any variable by design as well—so that the
+script does not retain access to the data, which would only increase memory
+pressure. So if the script doesn't retain a reference to the data, how does
+it access the data when it's needed?
 
+I've already hinted at the solution: While turning file names and contents into
+yielded lines of the bundle script, the bundle maker tracks the byte offset and
+length of each content literal. It helps that the bundle maker is implemented as
+a class with several methods that are generators instead of as a bunch of
+generator functions. That way, accumulating state while yielding lines only
+requires another method call, with the state stored by the bundle maker
+instance. It also helps that the bundle maker emits bundle contents first, at
+the beginning of the content script and that it relies on named string constants
+for the boilerplate before, between, and right after the file contents
+dictionary.
+
+Once the bundle maker is done with the file contents, it emits the manifest
+with the offset and length for each file included in the bundle:
 
 ```py
 >>> show(maker.emit_manifest())
 # ==============================================================================
 <BLANKLINE>
 MANIFEST = {
-    "spam/__init__.py": (275, 30),
-    "spam/__main__.py": (408, 51),
-    "spam/bacon.py": (559, 27),
+    "spam/__init__.py": (304, 30),
+    "spam/__main__.py": (437, 77),
+    "spam/bacon.py": (614, 27),
+    "spam/ham.html": (741, 382),
 }
 <BLANKLINE>
 >>>
 ```
 
-Tsutsumu's source repository not only includes the `spam` package. It also
-contains `can.py`, a script bundling that package. If you look at `can.py`'s
-manifest, you'll find that the offsets and lengths are the same as the ones
-shown above. That means, we can use the file for simulating how a bundle reads,
-say, `spam/bacon.py`:
+The data collected while yielding the file contents is one datum more granular
+than offset and length. But the generator for the manifest consumes the output
+of another generator that accumulates the original three length values per file.
+As you can see, Tsutsumu's not so secret sauce are generator functions and
+methods!
+
+Tsutsumu's source repository does not just include the `spam` package. But its
+collection of [prebundled scripts](https://github.io/apparebit/tsutsumu/bundles)
+includes [`can.py`](), which already bundles the package. If you check
+`can.py`'s contents, you should see the exact same files in the same order with
+the same offsets and lengths. That means that we can use the bundle to
+illustrate how the bundle runtime reads a file such as `spam/bacon.py`:
 
 ```py
->>> with open('can.py', mode='rb') as file:
-...     _ = file.seek(559)
+>>> with open('bundles/can.py', mode='rb') as file:
+...     _ = file.seek(614)
 ...     data = file.read(27)
 ...
 >>> data
@@ -209,19 +311,25 @@ b'b"print(\'spam/bacon.py\')\\n"'
 >>>
 ```
 
-As you can see, the data includes not only the file contents, but also the
-leading and trailing characters for turning the file contents into a valid
-Python bytestring literal. We need those decorations so that the bundle script
-is parsable. But why read those characters?
+As you can see, the returned bytes aren't just the file contents, but also the
+leading and trailing characters necessary for turning the contents into a valid
+Python bytestring literal. We need those "decorations" in the script, so that
+Python knows to parse the bytestring. But why read those extra characters?
 
-Python bytestring literals may only contain ASCII characters; all other code
-points must be escaped. It still is a reasonable format for representing the
-file contents of mostly Python code, since the code itself heavily favors ASCII.
-But there will be escape sequences. In fact, the above example already contains
-an escaped newline character: `\\n`—notice the double backslash.
+Python bytestring literals represent 256 values per byte with ASCII characters
+only. As a result, some code points necessarily require escape sequences. In
+fact, there are more code points that require escaping than printable ASCII
+characters. Nonetheless, this is a reasonable encoding for this domain because
+Python source code draws on ASCII mostly and remains human-readable under the
+encoding.
 
-As it turns out, there is a very simple solution to turning these bytestring
-literals into actual bytes: Just evaluate them!
+Still, we can't escape escape sequences—as the above example illustrates. Notice
+the trailing `\\n`? That's an escaped newline taking up two bytes in the
+bytestring. So why read a bytestring, as indicated by the leading `b'`,
+containing a bytestring literal, as indicated by the subsequent `b"`, when we
+really want proper bytes?
+
+Here's why:
 
 ```py
 >>> eval(data)
@@ -229,12 +337,11 @@ b"print('spam/bacon.py')\n"
 >>>
 ```
 
-We can confirm that two consecutive `b` prefixes and two consecutive backslash
-characters turned into one each, just as expected.
+It only takes one `eval` to turn two consecutive bytestring prefixes and
+backslash characters into one each, producing real `bytes` just as desired.
 
 
 ### 3.3 On-Disk vs In-Memory
-
 
 When file paths appear in the bundle script, they always are relative and only
 use forward slashes as path separators, no matter the operating system. That is
@@ -247,7 +354,6 @@ Doing so clearly und uniquely identifies a module's origin, even if a runtime
 loads several bundles. It also avoids constant translation between external and
 internal paths.
 
-
 The on-disk script and the in-memory bundle differ significantly in two aspects:
 First, on disk, the bundle script uses relative file paths with forward slashes,
 independent of operating system. That is consistent with Tsutsumu's goal of
@@ -256,8 +362,6 @@ uses absolute paths consistent with the local operating system's separator.
 Those paths combine the absolute path for the running bundle script with the
 relative path of the bundled file. As a result, each module path uniquely and
 clearly identifies its provenance.
-
-
 
 Since every bundle script ships with the contents of the `tsutsumu.bundle`
 module, including that same module
@@ -296,7 +400,7 @@ system when possible. Alas, I have some thoughts about the supposed replacement
 for the `get_data()` method, `importlib.resources`.
 
 
-## 4. importlib.resources Considered Harmful
+## 3.5 importlib.resources Considered Harmful
 
 Tsutsumu does *not* support `importlib`'s interface for retrieving resources and
 probably never will. The API simply is too complex for what it does, i.e.,
@@ -322,30 +426,38 @@ In summary, `importlib.resources` does not offer what it claims and is far too
 complex for what it offers. It should be scrapped!
 
 
-### 4.1 Use get_data()
+### 3.6 Use Loader.get_data() Instead
 
-Here's an example for how `get_data()` works. A module's loader is accessed
-through the corresponding *spec* record.
+Instead of `importlib.resources`, I recommend using `Loader.get_data()`. Despite
+being only one method, it suffices. If you know available resources and their
+relative paths within the package, all you need to do is look up the package's
+`__path__` or another module's `__file__` and graft the resource path onto it
+before handing over the combined path to `Loader.get_data()`.
 
 ```py
->>> import tsutsumu.maker
->>> tsutsumu.maker.__spec__                   # doctest: +ELLIPSIS
-ModuleSpec(name='tsutsumu.maker', loader=..., origin=...)
->>> tsutsumu.maker.__spec__.loader            # doctest: +ELLIPSIS
-<_frozen_importlib_external.SourceFileLoader object at ...>
->>> tsutsumu.maker.__spec__.loader.get_data   # doctest: +ELLIPSIS
-<bound method FileLoader.get_data of <...>>
+TODO
 ```
 
+If you do not know available resources and their relative paths, you are
+screwed. At least, you cannot discover available resources unless, that is, the
+package maintainers include some form of resource manifest at a well-known
+location. With a little preparation, a single method is almost as powerful as
+`importlib.resources`. In fact, I believe that a resource manifest is highly
+desirable even in the presence of an API supporting arbitrary traversal because
+it tells you where to find what resource instead of making you search.
 
-## 5. What's Missing?
 
-There are two features I'd like to add to Tsutsumu in the near future. They seem
-both highly desirable and reasonably straightforward to implement.
+## 4. What's Missing?
 
-  * [ ] Automatically determining module dependencies
-  * [ ] Including binary files in bundles
-  * [ ] Bundling namespace packages.
+I believe that Tsutsumu is ready for some real experimentation. But it hasn't
+seen the usage needed to be ready for usage in mission critical scenarios. It
+definitely could use a few more features. I can think of three:
+
+  * [ ] Automatically determine module dependencies
+  * [ ] Support inclusion of binary files in bundles
+  * [ ] Support the bundling of namespace packages
+
+What else?
 
 ---
 
