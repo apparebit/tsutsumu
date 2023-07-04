@@ -1,4 +1,5 @@
 from argparse import ArgumentParser, HelpFormatter
+from dataclasses import dataclass, field
 import os
 import sys
 from textwrap import dedent
@@ -6,11 +7,24 @@ import traceback
 
 from .maker import BundleMaker
 
+
 if __name__ == '__main__':
     try:
         width = min(os.get_terminal_size()[0], 70)
     except:
         width = 70
+
+    def width_limited_formatter(prog: str) -> HelpFormatter:
+        return HelpFormatter(prog, width=width)
+
+    @dataclass
+    class ToolOptions:
+        bundle_only: bool = False
+        output: 'None | str' = None
+        package: 'None | str' = None
+        repackage: bool = False
+        verbose: bool = False
+        roots: 'list[str]' = field(default_factory=list)
 
     parser = ArgumentParser('tsutsumu',
         description=dedent("""
@@ -19,26 +33,26 @@ if __name__ == '__main__':
             the bundled modules include only one __main__ module, that module is
             automatically selected. If they include more than one __main__
             module, please use the -p/--package option to specify the package
-            name.\u2029
+            name.
 
             This tool writes to standard out by default. Use the -o/--output
             option to name a file instead. To omit bundle runtime and bootstrap
             code, use the -b/--bundle-only option. That way, you can break your
             application into several bundles.
         """),
-        formatter_class=lambda prog: HelpFormatter(prog, width=width))
+        formatter_class=width_limited_formatter)
     parser.add_argument(
         '-b', '--bundle-only',
         action='store_true',
         help='emit only bundled files and their manifest, no runtime code')
     parser.add_argument(
-        '-p', '--package',
-        metavar='PACKAGE',
-        help='on startup, run the __main__ module for this package')
-    parser.add_argument(
         '-o', '--output',
         metavar='FILENAME',
         help='write the bundle script to the file')
+    parser.add_argument(
+        '-p', '--package',
+        metavar='PACKAGE',
+        help='on startup, run the __main__ module for this package')
     parser.add_argument(
         '-r', '--repackage',
         action='store_true',
@@ -51,7 +65,7 @@ if __name__ == '__main__':
         'roots',
         metavar='DIRECTORY', nargs='+',
         help='include all Python modules reachable from the directory')
-    options = parser.parse_args()
+    options = parser.parse_args(namespace=ToolOptions())
 
     try:
         if options.bundle_only and (options.package or options.repackage):

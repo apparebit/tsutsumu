@@ -1,10 +1,11 @@
 import os.path
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from importlib.abc import Loader
+    from importlib.machinery import ModuleSpec
     from types import ModuleType
 
 
@@ -20,7 +21,7 @@ _BUNDLE_START_IFFY = b'if False: {\n'
 _BUNDLE_START_DICT = b'BUNDLE  = {\n'
 _BUNDLE_STOP = b'}\n\n'
 
-_EXTENSIONS = ('.html', '.md', '.py', '.rst', '.txt')
+_EXTENSIONS = ('.css', '.html', '.js', '.md', '.py', '.rst', '.txt')
 
 _MAIN = """
 if __name__ == "__main__":
@@ -62,8 +63,8 @@ class BundleMaker:
         directories: 'Sequence[str | Path]',
         *,
         bundle_only: bool = False,
-        extensions: tuple[str, ...] = _EXTENSIONS,
-        package: None | str = None,
+        extensions: 'tuple[str, ...]' = _EXTENSIONS,
+        package: 'None | str' = None,
         repackage: bool = False,
         skip_dot: bool = True,
     ) -> None:
@@ -74,8 +75,8 @@ class BundleMaker:
         self._repackage = repackage
         self._skip_dot = skip_dot
 
-        self._ranges: list[tuple[str, int, int, int]] = []
-        self._repr: None | str = None
+        self._ranges: 'list[tuple[str, int, int, int]]' = []
+        self._repr: 'None | str' = None
 
     def __repr__(self) -> str:
         if self._repr is None:
@@ -83,16 +84,20 @@ class BundleMaker:
             self._repr = f'<tsutsumu-maker {roots}>'
         return self._repr
 
-    def write(self, path: str | Path) -> None:
-        files = sorted(self.list_files(), key=lambda f: f[1])
+    def write(self, path: 'str | Path') -> None:
+        files = sorted(self.list_files(), key=BundleMaker.file_ordering)
         with open(path, mode='wb') as file:
             for line in self.emit_script(files):
                 file.write(line)
 
     def run(self) -> None:
-        files = sorted(self.list_files(), key=lambda f: f[1])
+        files = sorted(self.list_files(), key=BundleMaker.file_ordering)
         for line in self.emit_script(files):
             print(line.decode('utf8'), end='')
+
+    @staticmethod
+    def file_ordering(file: 'tuple[Path, str]') -> str:
+        return file[1]
 
     def list_files(self) -> 'Iterator[tuple[Path, str]]':
         for root in self._directories:
@@ -119,7 +124,7 @@ class BundleMaker:
             and key in ('tsutsumu/__init__.py', 'tsutsumu/bundle.py')
         )
 
-    def emit_script(self, files: list[tuple[Path, str]]) -> 'Iterator[bytes]':
+    def emit_script(self, files: 'list[tuple[Path, str]]') -> 'Iterator[bytes]':
         package = self.main_package(files)
 
         yield from _BANNER.splitlines(keepends=True)
@@ -147,7 +152,7 @@ class BundleMaker:
         main = _MAIN.format(package=package, repackage=repackage)
         yield from main.encode('utf8').splitlines(keepends=True)
 
-    def main_package(self, files: list[tuple[Path, str]]) -> str:
+    def main_package(self, files: 'list[tuple[Path, str]]') -> str:
         if self._package is not None:
             key = f'{self._package.replace(".", "/")}/__ main__.py'
             if not any(key == file[1] for file in files):
@@ -219,7 +224,7 @@ class BundleMaker:
         # Why would anyone ever load modules from place other than the file system?
         import tsutsumu
         loader = self.get_loader(tsutsumu)
-        get_data = getattr(loader, 'get_data', None)
+        get_data: 'None | Callable[[str], bytes]' = getattr(loader, 'get_data', None)
         if get_data is not None:
             assert len(tsutsumu.__path__) == 1, 'tsutsumu is a regular package'
             mod_bundle = get_data(os.path.join(tsutsumu.__path__[0], 'bundle.py'))
@@ -242,10 +247,11 @@ class BundleMaker:
         yield b'\n'
 
     def get_loader(self, module: 'ModuleType') -> 'None | Loader':
-        spec = getattr(module, '__spec__', None)
-        loader = getattr(spec, 'loader', None)
+        spec: 'None | ModuleSpec' = getattr(module, '__spec__', None)
+        loader: 'None | Loader' = getattr(spec, 'loader', None)
         if loader is not None:
             return loader
 
         # Module.__loader__ is deprecated, to be removed in Python 3.14. Meanwhile...
-        return getattr(module, '__loader__', None)
+        loader2: 'None | Loader' = getattr(module, '__loader__', None)
+        return loader2
