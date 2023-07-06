@@ -153,24 +153,19 @@ class Bundle(Loader):
     def get_filename(self, fullname: str) -> str:
         return self._locate(fullname)[0]
 
-    def repackage_script(self, script: str) -> None:
+    def repackage(self) -> None:
         if __name__ != '__main__':
             Bundle.warn('attempt to repackage outside bundle script')
             return
 
-        tsutsumu, tsutsumu_bundle = self.recreate_modules(script)
-        self.add_attributes(tsutsumu, tsutsumu_bundle)
-        self.add_to_manifest(tsutsumu, tsutsumu_bundle)
+        tsutsumu, tsutsumu_bundle = self._recreate_modules()
+        self._add_attributes(tsutsumu, tsutsumu_bundle)
+        self._add_to_manifest(tsutsumu, tsutsumu_bundle)
 
         del sys.modules['__main__']
 
-    @staticmethod
-    def warn(message: str) -> None:
-        import warnings
-        warnings.warn(message)
-
-    def recreate_modules(self, path: str) -> 'tuple[ModuleType, ModuleType]':
-        pkgdir = os.path.join(path, 'tsutsumu')
+    def _recreate_modules(self) -> 'tuple[ModuleType, ModuleType]':
+        pkgdir = os.path.join(self._script, 'tsutsumu')
 
         for modname, filename, modpath in (
             ('tsutsumu', '__init__.py', pkgdir),
@@ -191,7 +186,7 @@ class Bundle(Loader):
 
         return sys.modules['tsutsumu'], sys.modules['tsutsumu.bundle']
 
-    def add_attributes(
+    def _add_attributes(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
@@ -212,7 +207,7 @@ class Bundle(Loader):
                     continue
             setattr(obj, attr, new)
 
-    def add_to_manifest(
+    def _add_to_manifest(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
@@ -250,3 +245,8 @@ class Bundle(Loader):
             else:
                 index += 1
 
+    @staticmethod
+    def warn(message: str) -> None:
+        # Assuming that warnings are infrequent, delay import until use.
+        import warnings
+        warnings.warn(message)
