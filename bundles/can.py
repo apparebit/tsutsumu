@@ -18,7 +18,7 @@ print('also:', __file__)
 "spam/bacon.py": b"print('spam/bacon.py')\n",
 # ------------------------------------------------------------------------------
 "spam/ham.html":
-b"""<!doctype html>
+b"""<!DOCTYPE html>
 <html lang=en>
 <meta charset=utf-8>
 <title>Ham?</title>
@@ -66,6 +66,7 @@ from typing import cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
     from types import CodeType, ModuleType
 
 
@@ -78,7 +79,7 @@ class Bundle(Loader):
     @classmethod
     def install(
         cls,
-        script: str,
+        script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
     ) -> 'Bundle':
         bundle = Bundle(script, manifest)
@@ -91,11 +92,12 @@ class Bundle(Loader):
 
     def __init__(
         self,
-        script: str,
+        script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
     ) -> None:
-        if len(script) == 0:
-            raise ValueError('path to bundle script is empty')
+        script = str(script)
+        if not os.path.isabs(script):
+            script = os.path.abspath(script)
         if script.endswith('/') or script.endswith(os.sep):
             raise ValueError(
                 'path to bundle script "{script}" ends in path separator')
@@ -132,15 +134,15 @@ class Bundle(Loader):
             raise ImportError(f'unknown path "{key}"')
         offset, length = self._manifest[key]
 
-        # Entirely empty files aren't included in the file dictionary.
-        if offset == 0 and length == 0:
+        # The bundle dictionary does not include empty files
+        if length == 0:
             return b''
 
         with open(self._script, mode='rb') as file:
             file.seek(offset)
             data = file.read(length)
             assert len(data) == length
-            # The source code for tsutsumu/bundle.py isn't a bytestring.
+            # The source code for tsutsumu/bundle.py isn't a bytestring
             return data[1:-1] if key == self._mod_bundle else cast(bytes, eval(data))
 
     def _locate(
@@ -204,30 +206,25 @@ class Bundle(Loader):
     def get_source(self, fullname: str) -> str:
         return importlib.util.decode_source(self[self.get_filename(fullname)])
 
-    def get_data(self, path: str) -> bytes:
-        return self[path]
+    def get_data(self, path: 'str | Path') -> bytes:
+        return self[str(path)]
 
     def get_filename(self, fullname: str) -> str:
         return self._locate(fullname)[0]
 
-    def repackage_script(self, script: str) -> None:
+    def repackage(self) -> None:
         if __name__ != '__main__':
             Bundle.warn('attempt to repackage outside bundle script')
             return
 
-        tsutsumu, tsutsumu_bundle = self.recreate_modules(script)
-        self.add_attributes(tsutsumu, tsutsumu_bundle)
-        self.add_to_manifest(tsutsumu, tsutsumu_bundle)
+        tsutsumu, tsutsumu_bundle = self._recreate_modules()
+        self._add_attributes(tsutsumu, tsutsumu_bundle)
+        self._add_to_manifest(tsutsumu, tsutsumu_bundle)
 
         del sys.modules['__main__']
 
-    @staticmethod
-    def warn(message: str) -> None:
-        import warnings
-        warnings.warn(message)
-
-    def recreate_modules(self, path: str) -> 'tuple[ModuleType, ModuleType]':
-        pkgdir = os.path.join(path, 'tsutsumu')
+    def _recreate_modules(self) -> 'tuple[ModuleType, ModuleType]':
+        pkgdir = os.path.join(self._script, 'tsutsumu')
 
         for modname, filename, modpath in (
             ('tsutsumu', '__init__.py', pkgdir),
@@ -248,7 +245,7 @@ class Bundle(Loader):
 
         return sys.modules['tsutsumu'], sys.modules['tsutsumu.bundle']
 
-    def add_attributes(
+    def _add_attributes(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
@@ -269,7 +266,7 @@ class Bundle(Loader):
                     continue
             setattr(obj, attr, new)
 
-    def add_to_manifest(
+    def _add_to_manifest(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
@@ -294,14 +291,32 @@ class Bundle(Loader):
             self._mod_bundle = tsutsumu_bundle.__file__
             self._manifest[self._mod_bundle] = (start, stop - start)
 
+    @staticmethod
+    def restrict_sys_path() -> None:
+        # FIXME: Maybe, we should disable venv paths, too?!
+        cwd = os.getcwd()
+
+        index = 0
+        while index < len(sys.path):
+            path = sys.path[index]
+            if path == '' or path == cwd:
+                del sys.path[index]
+            else:
+                index += 1
+
+    @staticmethod
+    def warn(message: str) -> None:
+        # Assuming that warnings are infrequent, delay import until use.
+        import warnings
+        warnings.warn(message)
+
 # ==============================================================================
 
 if __name__ == "__main__":
     import runpy
 
     # Don't load modules from current directory
-    if sys.path[0] == "" or os.path.samefile(".", sys.path[0]):
-        del sys.path[0]
+    Bundle.restrict_sys_path()
 
     # Install the bundle
     bundle = Bundle.install(__file__, MANIFEST)
