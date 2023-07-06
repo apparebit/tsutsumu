@@ -1,4 +1,4 @@
-from argparse import ArgumentParser, HelpFormatter
+from argparse import ArgumentParser, HelpFormatter, RawTextHelpFormatter
 from dataclasses import dataclass, field
 import os
 import sys
@@ -15,7 +15,7 @@ if __name__ == '__main__':
         width = 70
 
     def width_limited_formatter(prog: str) -> HelpFormatter:
-        return HelpFormatter(prog, width=width)
+        return RawTextHelpFormatter(prog, width=width)
 
     @dataclass
     class ToolOptions:
@@ -28,59 +28,66 @@ if __name__ == '__main__':
 
     parser = ArgumentParser('tsutsumu',
         description=dedent("""
-            Combine Python modules into a single, self-contained script that
-            executes a __main__ module just like \"python -m package\" does. If
-            the bundled modules include only one __main__ module, that module is
-            automatically selected. If they include more than one __main__
-            module, please use the -p/--package option to specify the package
+            Combine Python modules and related resources into a single,
+            self-contained script. To determine which files to include in the
+            bundle, this tool traverses the given directories and their
+            subdirectories. Since module resolution is based on path names, this
+            tool skips directories and files that do not have valid Python
+            module names.
+
+            By default, the bundle script executes a __main__ module just like
+            "python -m package" does. If the bundled modules include exactly one
+            such __main__ module, that module is automatically selected.
+            Otherwise, please use the -p/--package option to specify the package
             name.
 
-            This tool writes to standard out by default. Use the -o/--output
-            option to name a file instead. To omit bundle runtime and bootstrap
-            code, use the -b/--bundle-only option. That way, you can break your
-            application into several bundles.
+            Use the -b/--bundle-only option to omit the bundle runtime and
+            bootstrap code. That way, you can break your application into
+            several bundles.
+
+            By default, the bundle script is written to standard out, which may
+            break the bundle script since Python's standard out is a character
+            instead of a byte stream. Use the -o/--output option to write to a
+            file directly.
         """),
         formatter_class=width_limited_formatter)
     parser.add_argument(
         '-b', '--bundle-only',
         action='store_true',
-        help='emit only bundled files and their manifest, no runtime code')
+        help='emit only bundled files and their manifest,\nno runtime code')
     parser.add_argument(
         '-o', '--output',
         metavar='FILENAME',
-        help='write the bundle script to the file')
+        help='write bundle script to this file')
     parser.add_argument(
         '-p', '--package',
         metavar='PACKAGE',
-        help='on startup, run the __main__ module for this package')
+        help="execute this package's __main__ module")
     parser.add_argument(
         '-r', '--repackage',
         action='store_true',
-        help='repackage the Bundle class in a fresh "tsutsumu.bundle" module')
+        help='repackage runtime as "tsutsumu.bundle.Bundle"')
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='enable verbose output')
     parser.add_argument(
         'roots',
-        metavar='DIRECTORY', nargs='+',
-        help='include all Python modules reachable from the directory')
+        metavar='PKGROOT', nargs='+',
+        help="include all Python modules reachable from\nthe package's root directory")
     options = parser.parse_args(namespace=ToolOptions())
 
     try:
         if options.bundle_only and (options.package or options.repackage):
             raise ValueError('--bundle is incompatible with --package/--repackage')
 
-        maker = BundleMaker(
+        BundleMaker(
             options.roots,
             bundle_only=options.bundle_only,
+            output=options.output,
             package=options.package,
-            repackage=options.repackage
-        )
-        if options.output is None:
-            maker.run()
-        else:
-            maker.write(options.output)
+            repackage=options.repackage,
+        ).run()
     except Exception as x:
         if options.verbose:
             traceback.print_exception(x)
