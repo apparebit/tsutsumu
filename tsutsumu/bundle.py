@@ -7,6 +7,7 @@ from typing import cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
     from types import CodeType, ModuleType
 
 
@@ -19,7 +20,7 @@ class Bundle(Loader):
     @classmethod
     def install(
         cls,
-        script: str,
+        script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
     ) -> 'Bundle':
         bundle = Bundle(script, manifest)
@@ -32,11 +33,12 @@ class Bundle(Loader):
 
     def __init__(
         self,
-        script: str,
+        script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
     ) -> None:
-        if len(script) == 0:
-            raise ValueError('path to bundle script is empty')
+        script = str(script)
+        if not os.path.isabs(script):
+            script = os.path.abspath(script)
         if script.endswith('/') or script.endswith(os.sep):
             raise ValueError(
                 'path to bundle script "{script}" ends in path separator')
@@ -73,8 +75,8 @@ class Bundle(Loader):
             raise ImportError(f'unknown path "{key}"')
         offset, length = self._manifest[key]
 
-        # Entirely empty files aren't included in the file dictionary.
-        if offset == 0 and length == 0:
+        # The bundle dictionary does not include empty files
+        if length == 0:
             return b''
 
         with open(self._script, mode='rb') as file:
@@ -145,8 +147,8 @@ class Bundle(Loader):
     def get_source(self, fullname: str) -> str:
         return importlib.util.decode_source(self[self.get_filename(fullname)])
 
-    def get_data(self, path: str) -> bytes:
-        return self[path]
+    def get_data(self, path: 'str | Path') -> bytes:
+        return self[str(path)]
 
     def get_filename(self, fullname: str) -> str:
         return self._locate(fullname)[0]
