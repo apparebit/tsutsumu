@@ -236,3 +236,17 @@ class Bundle(Loader):
             assert tsutsumu_bundle.__file__ is not None
             self._mod_bundle = tsutsumu_bundle.__file__
             self._manifest[self._mod_bundle] = (start, stop - start)
+
+    @staticmethod
+    def restrict_sys_path() -> None:
+        # FIXME: Maybe, we should disable venv paths, too?!
+        cwd = os.getcwd()
+
+        index = 0
+        while index < len(sys.path):
+            path = sys.path[index]
+            if path == '' or path == cwd:
+                del sys.path[index]
+            else:
+                index += 1
+
