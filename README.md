@@ -11,11 +11,24 @@ Having said that, Tsutsumu isn't the only option for more easily distributing
 Python code and it may very well not be the right option for your use case.
 Notably, the standard library's
 [`zipapp`](https://docs.python.org/3/library/zipapp.html) also compresses
-bundled files and [pex](https://github.com/pantsbuild/pex) files combine
-bundling with virtual environments. Compared to Tsutsumu, they are more complex
-and more suitable for large applications. In contrast, Tsutsumu is best suited
-for scripts that import several dozen modules at most and should remain easily
+bundled files and [pex](https://github.com/pantsbuild/pex) files further combine
+bundling with virtual environments. That makes them more sophisticated but also
+significantly more heavyweight. Tsutsumu's simplicity makes it best suited to
+scripts that import a few dozen modules at most and should remain easily
 readable and inspectable before execution.
+
+The rest of this document covers Tsutsumu thusly:
+
+ 1. Just Download and Run!
+ 2. Make a Bundle
+ 3. The Workings of a Bundle
+     1. Layout of Bundled Files
+     2. A Bundle's Manifest: Offsets and Lengths
+     3. On-Disk vs In-Memory
+     4. Meta-Circular Bundling
+     5. importlib.resources Considered Harmful
+     6. Add a Resource Manifest Instead
+ 4. Still Missing
 
 
 ## 1. Just Download and Run!
@@ -24,10 +37,11 @@ There is nothing to install. There is no virtual environment to set up. Just
 download [this file](tsutsumu.py) and run it:
 
 ```sh
-$ curl -o tsutsumu.py \
+% curl -o tsutsumu.py \
     "https://raw.githubusercontent.com/apparebit/tsutsumu/boss/tsutsumu.py"
-$ python tsutsumu.py -h
-usage: tsutsumu [-h] [-o FILE] [-p PKG] [-r] [-v] DIR [DIR ...]
+% python tsutsumu.py -h
+usage: tsutsumu [-h] [-b] [-o FILENAME] [-p PACKAGE] [-r] [-v]
+                DIRECTORY [DIRECTORY ...]
 
 Combine Python modules into a single, self-contained script that
 ...
@@ -45,14 +59,15 @@ that, too. It just requires 3.5 times more command invocations and takes quite a
 bit longer. But sure, here you go:
 
 ```sh
-$ mkdir tsutsumu
-$ cd tsutsumu
-$ python -m venv .venv
-$ source .venv/bin/activate
-$ pip install --upgrade pip
-$ pip install tsutsumu
-$ python -m tsutsumu -h
-usage: tsutsumu [-h] [-o FILE] [-p PKG] [-r] [-v] DIR [DIR ...]
+% mkdir tsutsumu
+% cd tsutsumu
+% python -m venv .venv
+% source .venv/bin/activate
+(.venv) % pip install --upgrade pip
+(.venv) % pip install tsutsumu
+(.venv) % python -m tsutsumu -h
+usage: tsutsumu [-h] [-b] [-o FILENAME] [-p PACKAGE] [-r] [-v]
+                DIRECTORY [DIRECTORY ...]
 
 Combine Python modules into a single, self-contained script that
 ...
@@ -85,14 +100,18 @@ implementation is split across three modules:
 
   * `tsutsumu.__main__` for the command line interface;
   * `tsutsumu.maker` for generating bundles with the `BundleMaker` class;
-  * `tsutsumu.bundle` for running modules with the `Bundle` class.
+  * `tsutsumu.bundle` for importing from bundles with the `Bundle` class.
 
 The `__main__` module isn't particularly interesting, so I focus on the latter
 two, starting with the bundle maker. Conveniently, Tsutsumu's source repository
 includes the `spam` package as an illustrative aid. In addition to its own
 `__init__` package module, `spam` contains two Python modules, `__main__` and
-`bacon` as well as a very stylish `ham.html` webpage. (Please do check it out
-🙄). Now, let's get started turning those files into a bundle.
+`bacon` as well as a very stylish `ham.html` webpage.
+
+
+
+By the way, all subsequent code examples have been validated with Python's
+`doctest` tool.
 
 ```py
 >>> import tsutsumu.maker
@@ -103,40 +122,24 @@ includes the `spam` package as an illustrative aid. In addition to its own
 ```
 
 The bundle maker ultimately needs to produce a Python script. To get there, the
-bundle maker processes data from file granularity, when including them in the
-bundle, down to character granularity, when tracking each file's offset from the
-start of the file and length. It also creates Python source code one dictionary
-key at a time, i.e., at line granularity. Since it's easy enough to format
-strings to form entire lines and, similarly, easy enough to break larger blobs
-into lines, most bundle maker methods are generators that yield lines. In fact,
-they yield lines of `bytes` (not `str`) that include newlines (just `\n`).
+bundle maker processes data from byte to file granularity, which is quite the
+spread. Since it's easy enough to format strings to form entire lines and,
+similarly, break larger blobs into individual lines, most bundle maker methods
+treat the source line as the shared abstraction. However, since files are stored
+as byte strings, not character strings, and byte counts do matter, those source
+lines also are `bytes` (not `str`) and include newlines (just `\n`).
 
-The following function helps us print such binary lines:
-
-```py
->>> def show(lines):
-...     for line in lines:
-...         print(line.decode('utf8'), end='')
-...
->>>
-```
-
-It consumes all lines produced by a generator, decoding each line as UTF-8 and
-printing it without adding another newline, hence the `end` keyword argument.
-
-We won't get to `show()` right away, however, because the bundle maker doesn't
-just start yielding lines out of nowhere but instead starts by yielding paths to
-the bundled files. In fact, for each file, it yields an
+Having said that, the bundle maker starts out by iterating over the contents of
+directories, yielding the files to be bundled. For each such file, it yields an
 operating-system-specific `Path`—suitable for reading the file's contents from
 the local file system—as well as a relative `str` key with forward slashes—for
-identifying the file in the bundle's manifest. Here are bundle maker's keys for
-`spam`:
+identifying the file in the bundle's manifest. Here are the bundle maker's keys
+for `spam`:
 
 ```py
->>> file_ordering = tsutsumu.maker.BundleMaker.file_ordering
->>> files = list(sorted(maker.list_files(), key=file_ordering))
->>> for _, key in files:
-...     print(key)
+>>> files = list(sorted(maker.list_files(), key=lambda f: f.key))
+>>> for file in files:
+...     print(file.key)
 ...
 spam/__init__.py
 spam/__main__.py
@@ -145,12 +148,12 @@ spam/ham.html
 >>>
 ```
 
-Sure enough, bundle maker yields four files:
+Those are just the four files we expected:
 
-  * `spam/__init__.py` with the `spam` package module;
-  * `spam/__main__.py` with the package's main entry point;
-  * `spam/bacon.poy` with the `spam.bacon` submodule;
-  * `spam/ham.html` as a package resource.
+  * `spam/__init__.py` contains `spam`'s package module;
+  * `spam/__main__.py` is the package's main entry point;
+  * `spam/bacon.poy` contains the `spam.bacon` submodule;
+  * `spam/ham.html` is a package resource.
 
 
 ### 3.1 Layout of Bundled Files
@@ -170,22 +173,26 @@ does not assign the `dict` literal to a variable and, on top of that, includes
 it only inside an `if False:` branch.
 
 ```py
->>> show(tsutsumu.maker._BUNDLE_START_IFFY.splitlines(keepends=True))
+>>> writeall = tsutsumu.maker.BundleMaker.writeall
+>>> writeall(tsutsumu.maker._BUNDLE_START_IFFY.splitlines(keepends=True))
 if False: {
 >>>
 ```
 
-I don't know whether, for instance, CPython optimizes script parsing for this
-use case. I do know that Donald Knuth's TeX (which goes back to the late 1970s)
-does not parse conditional branches known to be false and instead scans
-subsequent tokens until it reaches the closest command sequence ending the
-branch.
+I'm not sure whether CPython actually takes this use case into account during
+parsing. In fact, I'd be surprised if it did. However, I also do know that
+Donald Knuth's TeX (which dates back to the late 1970s) does optimize just this
+case: Once TeX knows that a conditional branch is not taken, it scans upcoming
+tokens, taking only `\if` (and variations thereof), `\else`, and `\fi` into
+account, until it has found the end of the branch, resuming regular processing
+thereafter.
 
-In any case, we next emit the dictionary contents as file name, content pairs
-for each bundled file. We start with `spam/__init__.py`:
+In the hope that Python is just as clever, we next emit the dictionary contents
+as file name, content pairs for each bundled file. We start with
+`spam/__init__.py`:
 
 ```py
->>> show(maker.emit_text_file(*files[0]))
+>>> writeall(maker.emit_text_file(*files[0]))
 # ------------------------------------------------------------------------------
 "spam/__init__.py": b"print('spam/__init__.py')\n",
 >>>
@@ -199,7 +206,7 @@ lines of bytestrings that contain string and bytestring literals both. Ooh...
 Let's process the other three files:
 
 ```py
->>> show(maker.emit_text_file(*files[1]))
+>>> writeall(maker.emit_text_file(*files[1]))
 # ------------------------------------------------------------------------------
 "spam/__main__.py":
 b"""print('spam/__main__.py')
@@ -207,13 +214,13 @@ import spam.bacon
 <BLANKLINE>
 print('also:', __file__)
 """,
->>> show(maker.emit_text_file(*files[2]))
+>>> writeall(maker.emit_text_file(*files[2]))
 # ------------------------------------------------------------------------------
 "spam/bacon.py": b"print('spam/bacon.py')\n",
->>> show(maker.emit_text_file(*files[3]))
+>>> writeall(maker.emit_text_file(*files[3]))
 # ------------------------------------------------------------------------------
 "spam/ham.html":
-b"""<!doctype html>
+b"""<!DOCTYPE html>
 <html lang=en>
 <meta charset=utf-8>
 <title>Ham?</title>
@@ -245,7 +252,7 @@ p {
 Now we can close the dictionary again:
 
 ```py
->>> show(tsutsumu.maker._BUNDLE_STOP.splitlines(keepends=True))
+>>> writeall(tsutsumu.maker._BUNDLE_STOP.splitlines(keepends=True))
 }
 <BLANKLINE>
 >>>
@@ -275,7 +282,7 @@ Once the bundle maker is done with the file contents, it emits the manifest
 with the offset and length for each file included in the bundle:
 
 ```py
->>> show(maker.emit_manifest())
+>>> writeall(maker.emit_manifest())
 # ==============================================================================
 <BLANKLINE>
 MANIFEST = {
@@ -284,7 +291,6 @@ MANIFEST = {
     "spam/bacon.py": (614, 27),
     "spam/ham.html": (741, 382),
 }
-<BLANKLINE>
 >>>
 ```
 
@@ -337,77 +343,151 @@ b"print('spam/bacon.py')\n"
 >>>
 ```
 
-It only takes one `eval` to turn two consecutive bytestring prefixes and
-backslash characters into one each, producing real `bytes` just as desired.
+It only takes an `eval` to turn two consecutive bytestring prefixes and
+backslash characters into one each, producing real `bytes`.
 
 
 ### 3.3 On-Disk vs In-Memory
 
-When file paths appear in the bundle script, they always are relative and only
-use forward slashes as path separators, no matter the operating system. That is
-consistent with the fact that the bundle script is designed for flexible
-distribution and that bundled files only exist relative to the bundle script.
-However, when executing the bundle script, the runtime rewrites all paths to use
-the local operating system's path separator. It also makes them absolute by
-joining the bundle script's absolute path with the bundled file's relative path.
-Doing so clearly und uniquely identifies a module's origin, even if a runtime
-loads several bundles. It also avoids constant translation between external and
-internal paths.
+As presented so far, **bundled files are named by relative paths with forward
+slashes**. That makes sense for bundle scripts while they are inert and being
+distributed. After all, the raison d'être for Tsutsumu's bundle scripts is to be
+easily copied to just about any computer and run right there. That wouldn't be
+practical if the names used in the bundle were tied to the originating file
+system or limited to some operating system only.
 
-The on-disk script and the in-memory bundle differ significantly in two aspects:
-First, on disk, the bundle script uses relative file paths with forward slashes,
-independent of operating system. That is consistent with Tsutsumu's goal of
-running whereever a suitable Python is available. In memory, however, the bundle
-uses absolute paths consistent with the local operating system's separator.
-Those paths combine the absolute path for the running bundle script with the
-relative path of the bundled file. As a result, each module path uniquely and
-clearly identifies its provenance.
+However, the naming requirements change fundamentally the moment a bundle starts
+to execute on some computer. That instance should seamlessly integrate with the
+local Python runtime and operating system, while also tracking provenance, i.e.,
+whether modules originate from the bundle or from the local machine. In other
+words, a **running bundle uses absolute paths with the operating system's path
+segment separator**. Sure enough, the constructor for `tsutsumu.bundle.Bundle`
+performs the translation from relative, system-independent paths to absolute,
+system-specific paths by joining the absolute path to the bundle script with
+each key.
 
-Since every bundle script ships with the contents of the `tsutsumu.bundle`
-module, including that same module
+Let's see how that plays out in practice on the example of the `can.py` bundle:
 
-The second difference is that the `tsutsumu.bundle` package is incorporated into
-the bundle script. But just before handing over to `runpy`'s `run_module()`, the
-bundle script removes itself from `sys.modules`, thus making it impossible to
-reference the `Bundle` class. To make avoid effectively including the same
-source file twice when bundling Tsutsumu itself, the bundle repackages itself
+```py
+>>> import bundles.can
+>>> MANIFEST = bundles.can.MANIFEST
+>>> for key in MANIFEST.keys():
+...     print(key)
+...
+spam/__init__.py
+spam/__main__.py
+spam/bacon.py
+spam/ham.html
+>>>
+```
+
+Clearly, the `MANIFEST` is using relative paths.
+
+Since `bundles.can` isn't `__main__`, importing the bundle resulted in the
+definition of the `MANIFEST` dictionary and the `Bundle` class but it did not
+install a new `Bundle` instance in the module loading machinery. Before we
+manually install the bundle, there's a bit of housekeeping to do. We need to cut
+off our ability to load modules from the regular file system. Otherwise, we
+might inadvertently import the `spam` package from its sources and get mightily
+confused. (Not that that ever happened to me...)
+
+```py
+>>> bundles.can.Bundle.restrict_sys_path()
+>>> import spam
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ModuleNotFoundError: No module named 'spam'
+>>>
+```
+
+No more readily available `spam`? Time to open `bundles.can`:
+
+```py
+>>> from pathlib import Path
+>>> CAN = Path('.').absolute() / 'bundles' / 'can.py'
+>>> can_content = bundles.can.Bundle.install(CAN, MANIFEST)
+>>> import spam
+spam/__init__.py
+>>>
+```
+
+W00t, our supply of spam is secured. That's great. But how does it work? What
+did `Bundle.install()` do exactly?
+
+Well, a `Bundle` is what `importlib`'s documentation calls an *importer*, a
+class that is both a *meta path finder* and a *loader*. When Python tries to
+load a module that hasn't yet been loaded, it (basically) invokes
+`find_spec(name)` on each object in `sys.meta_path`, asking that meta path
+finder whether it recognizes the module. If the meta path finder does, it
+returns a description of the module. Most fields of that *spec* are just
+informative, i.e., strings, but one field, surprisingly called `loader`, is an
+object with methods for loading and executing the module's Python code. It just
+happens that `Bundle` does not delegate to a separate class for loading but does
+all the work itself.
+
+In short, `Bundle.install()` creates a new `Bundle()` and makes that bundle the
+first entry of `sys.meta_path`.
+
+Ok. But what about the bundle using absolute paths?
+
+```py
+>>> for key in can_content._manifest.keys():
+...     path = Path(key)
+...     assert path.is_absolute()
+...     print(str(path.relative_to(CAN)).replace('\\', '/'))
+...
+spam/__init__.py
+spam/__main__.py
+spam/bacon.py
+spam/ham.html
+>>>
+```
+
+Clearly, the installed `can_content` bundle is using absolute paths. Also, each
+key now starts with the bundle script's path, which we recreated in `CAN`. While
+we usually don't worry much about these paths when importing modules in Python,
+we do need to use them when loading resources from a package:
+
+```py
+>>> data = can_content.get_data(CAN / 'spam' / 'ham.html')
+>>> data[-5:-1]
+b'Ham!'
+>>>
+```
+
+Ham! it is. Unless: My apologies for the ham-fisted humor to all vegetarians.
+But then again, I'm sure that you were imagining suitable plant-based
+alternatives all along. Ham! it is.
 
 
 ### 3.4 Meta-Circular Bundling
 
-Tsutsumu bundles other Python applications, no problem. It can also bundle
-itself, no problem. That works because Tsutsumu avoid the file system API when
-including its own `tsutsumu/bundle.py` in the bundle script. It instead uses the
-module loader's `get_data()` method, which is designed for access to resources
-bundled with modules and packages.
+Tsutsumu can bundle any application that is not too large and written purely in
+Python. That includes itself. Tsutsumu can bundle itself because it avoids the
+file system when including its own `tsutsumu/bundle.py` in the bundle script.
+Instead, it uses the module loader's `get_data()` method, which is designed for
+accessing packaged resources and whose use I just demonstrated.
 
-That does duplicate the source code for `tsutsumu/bundle.py` in the bundle
-script, once as part of the bundled files and once as part of the bundle script
-runtime. While that may be advantageous, e.g., when experimenting with new
-versions, it also wastes about 7,600 bytes. To avoid that overhead, you can use
-the `-r`/`--repackage` option when bundling Tsutsumu. When that option is
-enabled, Tsutsumu special-cases the `tsutsumu` and `tsutsumu.bundle` modules and
+One drawback of Tsutsumu treating its own source code just like other Python
+files is the effective duplication of `tsutsumu/bundle.py`, once as part of the
+bundled files and once as part of the bundle script itself. While that may be
+desirable, for example, when experimenting with a new version of Tsutsumu, it
+also wastes almost 8 kb. To avoid that overhead, you can use the
+`-r`/`--repackage` command line option when bundling Tsutsumu. Under that
+option, Tsutsumu special cases the `tsutsumu` and `tsutsumu.bundle` modules and
 recreates them during startup—with `tsutsumu`'s `bundle` attribute referencing
 the `tsutsumu.bundle` module and `tsutsumu.bundle`'s `Bundle` attribute
-referencing the corresponding class. No other attributes are defined.
-
-The critical enabling factor for meta-circular bundling is the `get_data()`
-method. Since Tsutsumu's own loader implements the method, once Tsutsumu runs as
-a bundle script, it's bound to work. Python's regular file system loader
-currently supports the method as well. But since it has been deprecated, it may
-stop doing so in the future. For that reason, Tsutsumu falls back on the file
-system when possible. Alas, I have some thoughts about the supposed replacement
-for the `get_data()` method, `importlib.resources`.
+referencing the corresponding class.
 
 
 ## 3.5 importlib.resources Considered Harmful
 
-Tsutsumu does *not* support `importlib`'s interface for retrieving resources and
-probably never will. The API simply is too complex for what it does, i.e.,
-providing yet another way of traversing a hierarchy of directory-like and
-file-like entities. Furthermore, the documentation's claims about the benefits
-of integration with Python's import machinery are rather dubious, at the very
-best.
+While Tsutsumu does support `Loader.get_data()`, it does *not* support the more
+recent `Loader.get_resource_reader()` and probably never will. The API simply is
+too complex for what it does, i.e., providing yet another way of traversing a
+hierarchy of directory-like and file-like entities. Furthermore, the
+documentation's claims about the benefits of integration with Python's import
+machinery seem farfetched at best.
 
 A look at the 8 (!) modules implementing `importlib.resources` in the standard
 library bears this out: In addition to the documented `ResourceReader`,
@@ -426,32 +506,25 @@ In summary, `importlib.resources` does not offer what it claims and is far too
 complex for what it offers. It should be scrapped!
 
 
-### 3.6 Use Loader.get_data() Instead
+### 3.6 Add a Resource Manifest Instead
 
-Instead of `importlib.resources`, I recommend using `Loader.get_data()`. Despite
-being only one method, it suffices. If you know available resources and their
-relative paths within the package, all you need to do is look up the package's
-`__path__` or another module's `__file__` and graft the resource path onto it
-before handing over the combined path to `Loader.get_data()`.
-
-```py
-TODO
-```
-
-If you do not know available resources and their relative paths, you are
-screwed. At least, you cannot discover available resources unless, that is, the
-package maintainers include some form of resource manifest at a well-known
-location. With a little preparation, a single method is almost as powerful as
-`importlib.resources`. In fact, I believe that a resource manifest is highly
-desirable even in the presence of an API supporting arbitrary traversal because
-it tells you where to find what resource instead of making you search.
+When you compare the two ways of accessing resources, `Loader.get_data()` and
+`Loader.get_resource_reader()`, the latter obviously wins on traversing a
+package's namespace. But that's a non-feature when it comes to resource access.
+When code needs a resource, it shouldn't need to search for the resource by
+searching them all, it should be able to just access the resource, possibly
+through one level of indirection. In other words, if a package's resources may
+vary, the package should include a resource manifest at a well-known location,
+say, `manifest.toml` relative to the package's path. Once the package includes a
+manifest, `Loader.get_data()` more than suffices for retrieving resources.
+`Loader.get_resource_reader()` only adds useless complexity.
 
 
-## 4. What's Missing?
+## 4. Still Missing
 
-I believe that Tsutsumu is ready for some real experimentation. But it hasn't
-seen the usage needed to be ready for usage in mission critical scenarios. It
-definitely could use a few more features. I can think of three:
+I believe that Tsutsumu is ready for real-world use. However, since it hasn't
+seen wide usage, I'd hold off on mission-critical deployments for now.
+Meanwhile, Tsutsumu could use a few more features. I can think of three:
 
   * [ ] Automatically determine module dependencies
   * [ ] Support inclusion of binary files in bundles
