@@ -83,7 +83,7 @@ class Bundle(Loader):
             file.seek(offset)
             data = file.read(length)
             assert len(data) == length
-            # The source code for tsutsumu/bundle.py isn't a bytestring.
+            # The source code for tsutsumu/bundle.py isn't a bytestring
             return data[1:-1] if key == self._mod_bundle else cast(bytes, eval(data))
 
     def _locate(
