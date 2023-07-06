@@ -1,12 +1,17 @@
+from contextlib import nullcontext
+from keyword import iskeyword
+from operator import attrgetter
 import os.path
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import NamedTuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from contextlib import AbstractContextManager
     from importlib.abc import Loader
     from importlib.machinery import ModuleSpec
-    from types import ModuleType
+    from io import BufferedWriter
+    from typing import Callable
 
 
 _BANNER = (
@@ -28,8 +33,7 @@ if __name__ == "__main__":
     import runpy
 
     # Don't load modules from current directory
-    if sys.path[0] == "" or os.path.samefile(".", sys.path[0]):
-        del sys.path[0]
+    Bundle.restrict_sys_path()
 
     # Install the bundle
     bundle = Bundle.install(__file__, MANIFEST)
@@ -49,13 +53,21 @@ _SEPARATOR = (
     b'---------------------------------------\n')
 
 
+class BundledFile(NamedTuple):
+    """The local path and the platform-independent key for a bundled file."""
+    path: Path
+    key: str
+
+
 class BundleMaker:
     """
-    The bundle maker combines the contents of one or more directories with the
-    code for running a package's __main__ module while importing modules and
-    resource from the bundle. Its `run()` method yields the bundle script, line
-    by line but without line endings. The manifest counts one byte per line
-    ending, which should be just `\\n`.
+    The bundle maker combines the contents of several files into one Python
+    script. By default, the script only has a single variable, MANIFEST, which
+    is a dictionary mapping (relative) paths to byte offsets and lengths within
+    the bundle script. Optionally, it also includes the Bundle class, which
+    imports modules from the bundle script, and the corresponding bootstrap
+    code. Most methods of the bundle maker are generator methods yielding the
+    ines of the bundle script as newline-terminated bytestrings.
     """
 
     def __init__(
@@ -64,16 +76,16 @@ class BundleMaker:
         *,
         bundle_only: bool = False,
         extensions: 'tuple[str, ...]' = _EXTENSIONS,
+        output: 'None | str | Path' = None,
         package: 'None | str' = None,
         repackage: bool = False,
-        skip_dot: bool = True,
     ) -> None:
         self._directories = directories
         self._bundle_only = bundle_only
         self._extensions = extensions
+        self._output = output
         self._package = package
         self._repackage = repackage
-        self._skip_dot = skip_dot
 
         self._ranges: 'list[tuple[str, int, int, int]]' = []
         self._repr: 'None | str' = None
@@ -84,83 +96,66 @@ class BundleMaker:
             self._repr = f'<tsutsumu-maker {roots}>'
         return self._repr
 
-    def write(self, path: 'str | Path') -> None:
-        files = sorted(self.list_files(), key=BundleMaker.file_ordering)
-        with open(path, mode='wb') as file:
-            for line in self.emit_script(files):
-                file.write(line)
+    # ----------------------------------------------------------------------------------
 
     def run(self) -> None:
-        files = sorted(self.list_files(), key=BundleMaker.file_ordering)
-        for line in self.emit_script(files):
-            print(line.decode('utf8'), end='')
+        files = sorted(self.list_files(), key=attrgetter('key'))
+        package = None if self._bundle_only else self.main_package(files)
 
-    @staticmethod
-    def file_ordering(file: 'tuple[Path, str]') -> str:
-        return file[1]
+        # Surprise, nullcontext[None] and BufferedWriter unify thusly:
+        context: 'AbstractContextManager[None | BufferedWriter]'
+        if self._output is None:
+            context = nullcontext()
+        else:
+            context = open(self._output, mode='wb')
 
-    def list_files(self) -> 'Iterator[tuple[Path, str]]':
-        for root in self._directories:
-            if isinstance(root, str):
-                root = Path(root).resolve()
-            if not root.is_dir():
-                raise ValueError(f'path "{root}" is not a directory')
+        with context as script:
+            BundleMaker.writeall(self.emit_bundle(files), script)
+            if not self._bundle_only:
+                assert package is not None
+                BundleMaker.writeall(self.emit_runtime(package), script)
 
+    # ----------------------------------------------------------------------------------
+
+    def list_files(self) -> 'Iterator[BundledFile]':
+        # Since names of directories (and stems of Python files) are module
+        # names, traversal MUST NOT resolve symbolic links!
+        for directory in self._directories:
+            root = Path(directory).absolute()
             pending = list(root.iterdir())
             while pending:
-                item = pending.pop().resolve()
-                if self._skip_dot and item.name.startswith('.'):
-                    continue
-                elif item.is_file() and item.suffix in self._extensions:
+                item = pending.pop().absolute()
+                if self.is_text_file(item) and BundleMaker.is_module_name(item.stem):
                     key = str(item.relative_to(root.parent)).replace('\\', '/')
-                    if not self.exclude_file(key):
-                        yield item, key
-                elif item.is_dir():
+                    if not self.is_excluded_key(key):
+                        yield BundledFile(item, key)
+                elif item.is_dir() and BundleMaker.is_module_name(item.name):
                     pending.extend(item.iterdir())
 
-    def exclude_file(self, key: str) -> bool:
+    def is_text_file(self, item: Path) -> bool:
+        return item.is_file() and item.suffix in self._extensions
+
+    @staticmethod
+    def is_module_name(name: str) -> bool:
+        return name.isidentifier() and not iskeyword(name)
+
+    def is_excluded_key(self, key: str) -> bool:
         return (
             self._repackage
             and key in ('tsutsumu/__init__.py', 'tsutsumu/bundle.py')
         )
 
-    def emit_script(self, files: 'list[tuple[Path, str]]') -> 'Iterator[bytes]':
-        package = self.main_package(files)
+    # ----------------------------------------------------------------------------------
 
-        yield from _BANNER.splitlines(keepends=True)
-        yield from _BUNDLE_START_IFFY.splitlines(keepends=True)
-
-        for path, key in files:
-            yield from self.emit_text_file(path, key)
-
-        yield from _BUNDLE_STOP.splitlines(keepends=True)
-        yield from self.emit_manifest()
-
-        if self._bundle_only:
-            return
-
-        yield _SEPARATOR_HEAVY
-        yield b'\n'
-        yield from self.emit_mod_bundle()
-
-        yield _SEPARATOR_HEAVY
-        if self._repackage:
-            repackage = b'bundle.repackage_script(__file__)'
-        else:
-            repackage = b'del sys.modules["__main__"]'
-
-        main = _MAIN.format(package=package, repackage=repackage)
-        yield from main.encode('utf8').splitlines(keepends=True)
-
-    def main_package(self, files: 'list[tuple[Path, str]]') -> str:
+    def main_package(self, files: 'list[BundledFile]') -> str:
         if self._package is not None:
             key = f'{self._package.replace(".", "/")}/__ main__.py'
-            if not any(key == file[1] for file in files):
+            if not any(key == file.key for file in files):
                 raise ValueError(
                     f'package {self._package} has no __main__ module in bundle')
             return self._package
 
-        main_modules = [file[1] for file in files if file[1].endswith('/__main__.py')]
+        main_modules = [file.key for file in files if file.key.endswith('/__main__.py')]
         module_count = len(main_modules)
 
         if module_count == 0:
@@ -169,7 +164,24 @@ class BundleMaker:
             self._package = main_modules[0][:-12].replace('/', '.')
             return self._package
         else:
-            raise ValueError('bundle has several __main__ modules')
+            raise ValueError(
+                'bundle has several __main__ modules; '
+                'use -p/--package option to select one')
+
+    # ----------------------------------------------------------------------------------
+
+    def emit_bundle(
+        self,
+        files: 'list[BundledFile]',
+    ) -> 'Iterator[bytes]':
+        yield from _BANNER.splitlines(keepends=True)
+        yield from _BUNDLE_START_IFFY.splitlines(keepends=True)
+
+        for file in files:
+            yield from self.emit_text_file(file.path, file.key)
+
+        yield from _BUNDLE_STOP.splitlines(keepends=True)
+        yield from self.emit_manifest()
 
     def emit_text_file(self, path: Path, key: str) -> 'Iterator[bytes]':
         lines = [
@@ -208,7 +220,7 @@ class BundleMaker:
     def manifest_entries(self) -> 'Iterator[tuple[str, tuple[int, int]]]':
         offset = len(_BANNER) + len(_BUNDLE_START_IFFY)
         for key, prefix, data, suffix in self._ranges:
-            yield key, (offset + prefix, data)
+            yield key, ((0, 0) if data == 0 else (offset + prefix, data))
             offset += prefix + data + suffix
 
     def emit_manifest(self) -> 'Iterator[bytes]':
@@ -218,22 +230,42 @@ class BundleMaker:
         for key, (offset, length) in self.manifest_entries():
             yield f'    "{key}": ({offset:_d}, {length:_d}),\n'.encode('utf8')
         yield b'}\n'
-        yield b'\n'
 
-    def emit_mod_bundle(self) -> 'Iterator[bytes]':
-        # Why would anyone ever load modules from place other than the file system?
+    # ----------------------------------------------------------------------------------
+
+    def emit_runtime(
+        self,
+        package: str,
+    ) -> 'Iterator[bytes]':
+        yield b'\n'
+        yield _SEPARATOR_HEAVY
+        yield b'\n'
+        yield from self.emit_tsutsumu_bundle()
+
+        yield _SEPARATOR_HEAVY
+        if self._repackage:
+            repackage = b'bundle.repackage()'
+        else:
+            repackage = b'del sys.modules["__main__"]'
+
+        main = _MAIN.format(package=package, repackage=repackage)
+        yield from main.encode('utf8').splitlines(keepends=True)
+
+    def emit_tsutsumu_bundle(self) -> 'Iterator[bytes]':
         import tsutsumu
-        loader = self.get_loader(tsutsumu)
+        spec: 'None | ModuleSpec' = getattr(tsutsumu, '__spec__', None)
+        loader: 'None | Loader' = getattr(spec, 'loader', None)
         get_data: 'None | Callable[[str], bytes]' = getattr(loader, 'get_data', None)
+
         if get_data is not None:
             assert len(tsutsumu.__path__) == 1, 'tsutsumu is a regular package'
             mod_bundle = get_data(os.path.join(tsutsumu.__path__[0], 'bundle.py'))
         else:
             import warnings
             if loader is None:
-                warnings.warn("tsutsumu's module has no loader")
+                warnings.warn("tsutsumu has no module loader")
             else:
-                warnings.warn(f"tsutsumu's loader {loader} has no get_data()")
+                warnings.warn(f"tsutsumu's loader ({type(loader)}) has no get_data()")
 
             try:
                 mod_bundle_path = Path(__file__).parent / 'bundle.py'
@@ -246,12 +278,16 @@ class BundleMaker:
         yield from mod_bundle.splitlines(keepends=True)
         yield b'\n'
 
-    def get_loader(self, module: 'ModuleType') -> 'None | Loader':
-        spec: 'None | ModuleSpec' = getattr(module, '__spec__', None)
-        loader: 'None | Loader' = getattr(spec, 'loader', None)
-        if loader is not None:
-            return loader
+    # ----------------------------------------------------------------------------------
 
-        # Module.__loader__ is deprecated, to be removed in Python 3.14. Meanwhile...
-        loader2: 'None | Loader' = getattr(module, '__loader__', None)
-        return loader2
+    @staticmethod
+    def writeall(
+        lines: 'Iterator[bytes]',
+        file: 'None | BufferedWriter' = None,
+    ) -> None:
+        if file is None:
+            for line in lines:
+                print(line.decode('utf8'), end='')
+        else:
+            for line in lines:
+                file.write(line)
