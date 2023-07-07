@@ -40,13 +40,15 @@ class Bundle(Loader):
         version = cast(str, bindings['__version__'])
 
         return cls.install(path, manifest, version)
+
     @classmethod
     def install(
         cls,
         script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
+        version: str,
     ) -> 'Bundle':
-        bundle = Bundle(script, manifest)
+        bundle = Bundle(script, manifest, version)
         for finder in sys.meta_path:
             if bundle == finder:
                 raise ImportError(
@@ -58,6 +60,7 @@ class Bundle(Loader):
         self,
         script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
+        version: str,
     ) -> None:
         script = str(script)
         if not os.path.isabs(script):
@@ -74,7 +77,7 @@ class Bundle(Loader):
 
         self._script = script
         self._manifest = {intern(k): v for k, v in manifest.items()}
-        self._mod_bundle: 'None | str' = None
+        self._version = version
 
     def __hash__(self) -> int:
         return hash(self._script) + hash(self._manifest)
