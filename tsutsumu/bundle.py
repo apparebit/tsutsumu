@@ -103,11 +103,12 @@ class Bundle(Loader):
             return b''
 
         with open(self._script, mode='rb') as file:
-            file.seek(offset)
+            # If the offset's sign is negative, the module is repackaged and its
+            # source is not embedded in a bytestring literal.
+            file.seek(offset if offset >= 0 else -offset)
             data = file.read(length)
             assert len(data) == length
-            # The source code for tsutsumu/bundle.py isn't a bytestring
-            return data[1:-1] if key == self._mod_bundle else cast(bytes, eval(data))
+            return data if offset < 0 else cast(bytes, eval(data))
 
     def _locate(
         self,
