@@ -1,11 +1,12 @@
-# Tsutsumu: A Python Module Bundler
+# Tsutsumu: A Python Module Bundler and Runtime
 
 > つつむ (tsutsumu), Japanese for bundle
 
-Tsutsumu implements Python bundles, that is, Python scripts that contain several
-modules or packages. That way, Tsutsumu enables self-contained scripts that can
-run anywhere a suitable Python interpreter is available—*without* creating a
-virtual environment or installing packages first.
+Tsutsumu creates Python module bundles, that is, scripts that contain many more
+modules and supporting resources, and imports modules from bundles. That way,
+Tsutsumu enables self-contained scripts that can run anywhere a suitable Python
+interpreter is available—*without* creating a virtual environment or installing
+packages first.
 
 Having said that, Tsutsumu isn't the only option for more easily distributing
 Python code and it may very well not be the right option for your use case.
@@ -19,16 +20,24 @@ readable and inspectable before execution.
 
 The rest of this document covers Tsutsumu thusly:
 
- 1. Just Download and Run!
- 2. Make a Bundle
- 3. The Workings of a Bundle
-     1. Layout of Bundled Files
-     2. A Bundle's Manifest: Offsets and Lengths
-     3. On-Disk vs In-Memory
-     4. Meta-Circular Bundling
-     5. importlib.resources Considered Harmful
-     6. Add a Resource Manifest Instead
- 4. Still Missing
+ 1. [Just Download and
+    Run!](https://github.com/apparebit/tsutsumu#1-just-download-and-run)
+ 2. [Make a Bundle](https://github.com/apparebit/tsutsumu#2-make-a-bundle)
+ 3. [The Workings of a
+    Bundle](https://github.com/apparebit/tsutsumu#3-the-workings-of-a-bundle)
+     1. [Layout of Bundled
+        Files](https://github.com/apparebit/tsutsumu#31-layout-of-bundled-files)
+     2. [A Bundle's Manifest: Offsets and
+        Lengths](https://github.com/apparebit/tsutsumu#32-a-bundles-manifest-offsets-and-lengths)
+     3. [On-Disk vs
+        In-Memory](https://github.com/apparebit/tsutsumu#33-on-disk-vs-in-memory)
+     4. [Meta-Circular
+        Bundling](https://github.com/apparebit/tsutsumu#34-meta-circular-bundling)
+     5. [importlib.resources Considered
+        Harmful](https://github.com/apparebit/tsutsumu#35-importlibresources-considered-harmful)
+     6. [Add a Resource Manifest
+        Instead](https://github.com/apparebit/tsutsumu#36-add-a-resource-manifest-instead)
+ 4. [Still Missing](https://github.com/apparebit/tsutsumu#4-still-missing)
 
 
 ## 1. Just Download and Run!
