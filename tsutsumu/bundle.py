@@ -18,6 +18,29 @@ class Bundle(Loader):
     """
 
     @classmethod
+    def exec_install(
+        cls,
+        path: 'str | Path',
+    ) -> 'Bundle':
+        with open(path, mode='rb') as file:
+            content = file.read()
+
+        if (
+            content.find(b'\nif False: {\n')
+            or content.find(b'=\n\n__manifest__ = {') == -1
+            or content.find(b'}\n\n__version__ = "') == -1
+        ):
+            raise ValueError(f'"{path}" does not appear to be a bundle')
+
+        bindings: 'dict[str, object]' = {}
+        exec(content, bindings)
+        # cast() would require backwards-compatible type value; comment seems simpler.
+        manifest: 'dict[str, tuple[int, int]]' = (
+            bindings['__manifest__']) # type: ignore[assignment]
+        version = cast(str, bindings['__version__'])
+
+        return cls.install(path, manifest, version)
+    @classmethod
     def install(
         cls,
         script: 'str | Path',
@@ -154,83 +177,77 @@ class Bundle(Loader):
         return self._locate(fullname)[0]
 
     def repackage(self) -> None:
-        if __name__ != '__main__':
-            Bundle.warn('attempt to repackage outside bundle script')
-            return
+        # Do not repackage if modules exist or their paths are listed in manifest!
+        if 'tsutsumu' in sys.modules or 'tsutsumu.bundle' in sys.modules:
+            raise ValueError('unable to repackage() already existing modules')
 
-        tsutsumu, tsutsumu_bundle = self._recreate_modules()
-        self._add_attributes(tsutsumu, tsutsumu_bundle)
-        self._add_to_manifest(tsutsumu, tsutsumu_bundle)
+        pkg_path = os.path.join(self._script, 'tsutsumu')
+        paths = [os.path.join(pkg_path, file) for file in ('__init__.py', 'bundle.py')]
+        if paths[0] in self._manifest or paths[1] in self._manifest:
+            raise ValueError('unable to repackage() modules already in manifest')
 
-        del sys.modules['__main__']
+        # Repackage: Create modules, add attributes, add to manifest.
+        package, bundle = self._repackage_create_modules(pkg_path, paths[0], paths[1])
+        self._repackage_add_attributes(package, bundle)
+        self._repackage_add_to_manifest(package, bundle)
 
-    def _recreate_modules(self) -> 'tuple[ModuleType, ModuleType]':
-        pkgdir = os.path.join(self._script, 'tsutsumu')
+        # If running as __main__ module, remove module.
+        if __name__ == '__main__':
+            del sys.modules['__main__']
 
-        for modname, filename, modpath in (
-            ('tsutsumu', '__init__.py', pkgdir),
-            ('tsutsumu.bundle', 'bundle.py', None),
+    def _repackage_create_modules(
+        self,
+        pkg_path: str,
+        init_path: str,
+        bundle_path: str,
+    ) -> 'tuple[ModuleType, ModuleType]':
+        for name, path, pkgdir in (
+            ('tsutsumu', init_path, pkg_path),
+            ('tsutsumu.bundle', bundle_path, None),
         ):
-            if modname in sys.modules:
-                Bundle.warn(f'module {modname} already exists')
-                continue
-
-            fullpath = os.path.join(pkgdir, filename)
-            spec = ModuleSpec(modname, self, origin=fullpath, is_package=bool(modpath))
-            if modpath:
+            spec = ModuleSpec(name, self, origin=path, is_package=bool(pkgdir))
+            if pkgdir:
                 assert spec.submodule_search_locations is not None
-                spec.submodule_search_locations.append(modpath)
+                spec.submodule_search_locations.append(pkgdir)
             module = importlib.util.module_from_spec(spec)
-            setattr(module, '__file__', fullpath)
-            sys.modules[modname] = module
+            setattr(module, '__file__', path)
+            sys.modules[name] = module
 
         return sys.modules['tsutsumu'], sys.modules['tsutsumu.bundle']
 
-    def _add_attributes(
+    def _repackage_add_attributes(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
     ) -> None:
-        for obj, attr, old, new in (
-            (tsutsumu, 'bundle', None, tsutsumu_bundle),
-            (tsutsumu_bundle, 'Bundle', None, Bundle),
-            (Bundle, '__module__', '__main__', 'tsutsumu.bundle'),
+        for obj, attr, value in (
+            (tsutsumu, '__version__', self._version),
+            (tsutsumu, 'bundle', tsutsumu_bundle),
+            (tsutsumu_bundle, 'Bundle', Bundle),
+            (Bundle, '__module__', 'tsutsumu.bundle'),
         ):
-            if old is None:
-                if hasattr(obj, attr):
-                    Bundle.warn(f'{obj} already has attribute {attr}')
-                    continue
-            else:
-                actual: 'None | str' = getattr(obj, attr, None)
-                if actual != old:
-                    Bundle.warn(f"{obj}.{attr} is {actual} instead of {old}")
-                    continue
-            setattr(obj, attr, new)
+            setattr(obj, attr, value)
 
-    def _add_to_manifest(
+    def _repackage_add_to_manifest(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
     ) -> None:
-        if tsutsumu.__file__ in self._manifest:
-            Bundle.warn(f'manifest already includes "{tsutsumu.__file__}"')
-        else:
-            assert tsutsumu.__file__ is not None
-            self._manifest[tsutsumu.__file__] = (0, 0)
+        hr = b'# ' + b'=' * 78 + b'\n'
+        with open(self._script, mode='rb') as file:
+            content = file.read()
+        index = content.find(hr)
+        index = content.find(hr, index + len(hr))
+        init_start = content.rfind(b'__version__', 0, index)
+        init_length = index - 1 - init_start
+        bundle_start = index + len(hr) + 1
+        bundle_length = content.find(hr, bundle_start) - 1 - bundle_start
 
-        if tsutsumu_bundle.__file__ in self._manifest:
-            Bundle.warn(f'manifest already includes "{tsutsumu_bundle.__file__}"')
-        else:
-            hr = b'# ' + b'=' * 78 + b'\n'
-            with open(self._script, mode='rb') as file:
-                content = file.read()
-            start = content.find(hr)
-            start = content.find(hr, start + len(hr)) + len(hr)
-            stop = content.find(hr, start)
+        assert tsutsumu.__file__ is not None
+        self._manifest[tsutsumu.__file__] = (-init_start, init_length)
 
-            assert tsutsumu_bundle.__file__ is not None
-            self._mod_bundle = tsutsumu_bundle.__file__
-            self._manifest[self._mod_bundle] = (start, stop - start)
+        assert tsutsumu_bundle.__file__ is not None
+        self._manifest[tsutsumu_bundle.__file__] = (-bundle_start, bundle_length)
 
     @staticmethod
     def restrict_sys_path() -> None:
