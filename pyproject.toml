@@ -4,7 +4,6 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "tsutsumu"
-version = "0.1"
 description = "Python module bundles"
 readme = "README.md"
 requires-python = ">=3.7"
@@ -35,6 +34,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = []
+dynamic = ["version"]
 
 [project.optional-dependencies]
 
@@ -47,9 +47,12 @@ dev = [
 [project.urls]
 Repository = "https://github.com/apparebit/tsutsumu"
 
+[project.scripts]
+tsutsumu = "tsutsumu.__main__:main"
+
 [tool.mypy]
 python_version = "3.11"
-files = ["tsutsumu/*.py"]
+files = ["tsutsumu/*.py", "test.py"]
 warn_unused_configs = true
 disallow_any_unimported = true
 disallow_any_expr = true
@@ -70,3 +73,7 @@ warn_return_any = true
 warn_unreachable = true
 strict_equality = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "tmp.*"
+follow_imports = "silent"
