@@ -34,20 +34,22 @@ The rest of this document covers Tsutsumu thusly:
 ## 1. Just Download and Run!
 
 There is nothing to install. There is no virtual environment to set up. Just
-download [this file](tsutsumu.py) and run it:
+download [this one Python
+script](https://raw.githubusercontent.com/apparebit/tsutsumu/boss/bundles/bundler.py)
+and run it:
 
 ```sh
 % curl -o tsutsumu.py \
-    "https://raw.githubusercontent.com/apparebit/tsutsumu/boss/tsutsumu.py"
+    "https://raw.githubusercontent.com/apparebit/tsutsumu/boss/bundles/bundler.py"
 % python tsutsumu.py -h
-usage: tsutsumu [-h] [-b] [-o FILENAME] [-p PACKAGE] [-r] [-v]
-                DIRECTORY [DIRECTORY ...]
+usage: tsutsumu [-h] [-b] [-m MODULE] [-o FILENAME] [-r] [-v]
+                PKGROOT [PKGROOT ...]
 
-Combine Python modules into a single, self-contained script that
+Combine Python modules and related resources into a single,
 ...
 ```
 
-Yup. I used Tsutsumu to bundle its own modules into `tsutsumu.py`. As a result,
+Yup. I used Tsutsumu to bundle its own modules into `bundler.py`. As a result,
 getting started with Tsutsumu is as easy as downloading a file and running it.
 Bundled scripts can be this easy and convenient!
 
@@ -66,10 +68,10 @@ bit longer. But sure, here you go:
 (.venv) % pip install --upgrade pip
 (.venv) % pip install tsutsumu
 (.venv) % python -m tsutsumu -h
-usage: tsutsumu [-h] [-b] [-o FILENAME] [-p PACKAGE] [-r] [-v]
-                DIRECTORY [DIRECTORY ...]
+usage: tsutsumu [-h] [-b] [-m MODULE] [-o FILENAME] [-r] [-v]
+                PKGROOT [PKGROOT ...]
 
-Combine Python modules into a single, self-contained script that
+Combine Python modules and related resources into a single,
 ...
 ```
 
@@ -96,22 +98,26 @@ formats seems like another obvious next step.
 ## 3. The Workings of a Bundle
 
 This section is a hands-on exploration of Tsutsumu's inner workings. Its
-implementation is split across three modules:
+implementation is split across the following modules:
 
-  * `tsutsumu.__main__` for the command line interface;
+  * `tsutsumu` for Tsutsumu's `__version__` and nothing else;
+  * `tsutsumu.__main__` for the `main()` entry point and command line interface;
+  * `tsutsumu.debug` for validating the manifest and contents of bundle scripts;
   * `tsutsumu.maker` for generating bundles with the `BundleMaker` class;
   * `tsutsumu.bundle` for importing from bundles with the `Bundle` class.
 
-The `__main__` module isn't particularly interesting, so I focus on the latter
-two, starting with the bundle maker. Conveniently, Tsutsumu's source repository
-includes the `spam` package as an illustrative aid. In addition to its own
-`__init__` package module, `spam` contains two Python modules, `__main__` and
-`bacon` as well as a very stylish `ham.html` webpage.
+As that breakdown should make clear, `tsutsumu.maker` and `tsutsumu.bundle`
+provide the critical two classes that do all the heavy lifting. Hence I'll be
+focusing on them in this section. To illustrate their workings, I rely on the
+`spam` package also contained in Tsutsumu's source repository. In addition to
+its own `__init__` package module, the package contains two Python modules,
+`__main__` and `bacon`, as well as a very stylish webpage, `ham.html`.
 
+All subsequent code examples have been validated with Python's `doctest` tool.
+Running the tool over this file is part of Tsutsumu's [test
+suite](https://github.com/apparebit/tsutsumu/blob/boss/test.py).
 
-
-By the way, all subsequent code examples have been validated with Python's
-`doctest` tool.
+Let's get started making a bundle with the contents of the `spam` directory:
 
 ```py
 >>> import tsutsumu.maker
@@ -123,11 +129,12 @@ By the way, all subsequent code examples have been validated with Python's
 
 The bundle maker ultimately needs to produce a Python script. To get there, the
 bundle maker processes data from byte to file granularity, which is quite the
-spread. Since it's easy enough to format strings to form entire lines and,
-similarly, break larger blobs into individual lines, most bundle maker methods
-treat the source line as the shared abstraction. However, since files are stored
-as byte strings, not character strings, and byte counts do matter, those source
-lines also are `bytes` (not `str`) and include newlines (just `\n`).
+spread. At the same time, it's easy enough to format strings that are entire
+lines and, similarly, break down larger blobs into individual lines. Hence, most
+bundle maker methods treat the source line as the common unit of abstraction.
+However, since files are stored as byte string, not character strings, and byte
+counts do matter, those source lines are `bytes`, *not* `str`, and include
+newlines, *just* `\n`.
 
 Having said that, the bundle maker starts out by iterating over the contents of
 directories, yielding the files to be bundled. For each such file, it yields an
@@ -148,7 +155,7 @@ spam/ham.html
 >>>
 ```
 
-Those are just the four files we expected:
+Those are just the four files we expect:
 
   * `spam/__init__.py` contains `spam`'s package module;
   * `spam/__main__.py` is the package's main entry point;
@@ -285,11 +292,11 @@ with the offset and length for each file included in the bundle:
 >>> writeall(maker.emit_manifest())
 # ==============================================================================
 <BLANKLINE>
-MANIFEST = {
-    "spam/__init__.py": (304, 30),
-    "spam/__main__.py": (437, 77),
-    "spam/bacon.py": (614, 27),
-    "spam/ham.html": (741, 382),
+__manifest__ = {
+    "spam/__init__.py": (305, 30),
+    "spam/__main__.py": (438, 77),
+    "spam/bacon.py": (615, 27),
+    "spam/ham.html": (742, 382),
 }
 >>>
 ```
@@ -301,15 +308,16 @@ As you can see, Tsutsumu's not so secret sauce are generator functions and
 methods!
 
 Tsutsumu's source repository does not just include the `spam` package. But its
-collection of [prebundled scripts](https://github.io/apparebit/tsutsumu/bundles)
-includes [`can.py`](), which already bundles the package. If you check
-`can.py`'s contents, you should see the exact same files in the same order with
-the same offsets and lengths. That means that we can use the bundle to
-illustrate how the bundle runtime reads a file such as `spam/bacon.py`:
+so far tiny collection of [prebundled
+scripts](https://github.com/apparebit/tsutsumu/tree/boss/bundles) includes
+`can.py`, which already bundles the package. If you check `can.py`'s contents,
+you should see the exact same files in the same order with the same offsets and
+lengths. That means that we can use the bundle to illustrate how the bundle
+runtime reads a file such as `spam/bacon.py`:
 
 ```py
 >>> with open('bundles/can.py', mode='rb') as file:
-...     _ = file.seek(614)
+...     _ = file.seek(615)
 ...     data = file.read(27)
 ...
 >>> data
@@ -370,8 +378,8 @@ Let's see how that plays out in practice on the example of the `can.py` bundle:
 
 ```py
 >>> import bundles.can
->>> MANIFEST = bundles.can.MANIFEST
->>> for key in MANIFEST.keys():
+>>> manifest = bundles.can.__manifest__
+>>> for key in manifest.keys():
 ...     print(key)
 ...
 spam/__init__.py
@@ -381,11 +389,11 @@ spam/ham.html
 >>>
 ```
 
-Clearly, the `MANIFEST` is using relative paths.
+Clearly, the `__manifest__` is using relative paths.
 
 Since `bundles.can` isn't `__main__`, importing the bundle resulted in the
-definition of the `MANIFEST` dictionary and the `Bundle` class but it did not
-install a new `Bundle` instance in the module loading machinery. Before we
+definition of the `__manifest__` dictionary and the `Bundle` class but it did
+not install a new `Bundle` instance in the module loading machinery. Before we
 manually install the bundle, there's a bit of housekeeping to do. We need to cut
 off our ability to load modules from the regular file system. Otherwise, we
 might inadvertently import the `spam` package from its sources and get mightily
@@ -404,8 +412,9 @@ No more readily available `spam`? Time to open `bundles.can`:
 
 ```py
 >>> from pathlib import Path
->>> CAN = Path('.').absolute() / 'bundles' / 'can.py'
->>> can_content = bundles.can.Bundle.install(CAN, MANIFEST)
+>>> can_path = Path('.').absolute() / 'bundles' / 'can.py'
+>>> version = bundles.can.__version__
+>>> can_content = bundles.can.Bundle.install(can_path, manifest, version)
 >>> import spam
 spam/__init__.py
 >>>
@@ -434,7 +443,7 @@ Ok. But what about the bundle using absolute paths?
 >>> for key in can_content._manifest.keys():
 ...     path = Path(key)
 ...     assert path.is_absolute()
-...     print(str(path.relative_to(CAN)).replace('\\', '/'))
+...     print(str(path.relative_to(can_path)).replace('\\', '/'))
 ...
 spam/__init__.py
 spam/__main__.py
@@ -449,15 +458,43 @@ we usually don't worry much about these paths when importing modules in Python,
 we do need to use them when loading resources from a package:
 
 ```py
->>> data = can_content.get_data(CAN / 'spam' / 'ham.html')
+>>> data = can_content.get_data(can_path / 'spam' / 'ham.html')
 >>> data[-5:-1]
 b'Ham!'
 >>>
 ```
 
-Ham! it is. Unless: My apologies for the ham-fisted humor to all vegetarians.
-But then again, I'm sure that you were imagining suitable plant-based
-alternatives all along. Ham! it is.
+Ham! it is.
+
+My apologies to vegetarians. You probably are tired of all this ham-fisted humor
+by now. So let's make sure we stop right here:
+
+```py
+>>> can_content.uninstall()
+>>> import spam.bacon
+Traceback (most recent call last):
+  ...
+ModuleNotFoundError: No module named 'spam.bacon'
+>>>
+```
+
+Alas, already imported modules are much harder to expunge. In fact, it may just
+be impossible. In this case, however, it is feasible:
+
+```py
+>>> import sys
+>>> 'spam' in sys.modules
+True
+>>> import spam
+>>> del sys.modules['spam']
+>>> 'spam' in sys.modules
+False
+>>> import spam
+Traceback (most recent call last):
+  ...
+ModuleNotFoundError: No module named 'spam'
+>>>
+```
 
 
 ### 3.4 Meta-Circular Bundling
@@ -534,4 +571,5 @@ What else?
 
 ---
 
-Tsutsumu is © 2023 Robert Grimm and has been released under the Apache 2.0 license.
+Tsutsumu is © 2023 [Robert Grimm](https://apparebit.com) and has been released
+under the Apache 2.0 license.
