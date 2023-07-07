@@ -253,6 +253,14 @@ class Bundle(Loader):
         assert tsutsumu_bundle.__file__ is not None
         self._manifest[tsutsumu_bundle.__file__] = (-bundle_start, bundle_length)
 
+    def uninstall(self) -> None:
+        index = 0
+        while index < len(sys.meta_path):
+            if self == sys.meta_path[index]:
+                del sys.meta_path[index]
+            else:
+                index += 1
+
     @staticmethod
     def restrict_sys_path() -> None:
         # FIXME: Maybe, we should disable venv paths, too?!
