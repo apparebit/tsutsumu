@@ -176,7 +176,7 @@ def repackaged_module_test() -> None:
 
     # Importing repackaged_bundler does not execute bootstrap code,
     # since it is not the __main__ module.
-    import tmp.repackaged_bundler
+    import tmp.repackaged_bundler # type: ignore
 
     # Extract __manifest__, __version__, and Bundle from module.
     repackaged_bundle_path = cwd / 'tmp' / 'repackaged_bundler.py'
