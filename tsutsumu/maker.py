@@ -1,8 +1,8 @@
 from contextlib import nullcontext
 from keyword import iskeyword
-from operator import attrgetter
 import os.path
 from pathlib import Path
+import sys
 from typing import NamedTuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,15 +10,20 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from importlib.abc import Loader
     from importlib.machinery import ModuleSpec
-    from io import BufferedWriter
-    from typing import Callable
+    from typing import Callable, Protocol
+
+    class Writable(Protocol):
+        def write(self, data: 'bytes | bytearray') -> int:
+            ...
+
+from tsutsumu import __version__
 
 
 _BANNER = (
     b'#!/usr/bin/env python3\n'
     b'# -*- coding: utf-8 -*-\n'
     b'# DO NOT EDIT! This script was automatically generated\n'
-    b'# by Tsutsumu <https://github.io/apparebit/tsutsumu>.\n'
+    b'# by Tsutsumu <https://github.com/apparebit/tsutsumu>.\n'
     b'# Manual edits may just break it.\n\n')
 
 # Both bundle starts must have the same length
@@ -36,13 +41,13 @@ if __name__ == "__main__":
     Bundle.restrict_sys_path()
 
     # Install the bundle
-    bundle = Bundle.install(__file__, MANIFEST)
+    bundle = Bundle.install(__file__, __manifest__, __version__)
 
     # This script does not exist. It never ran!
     {repackage}
 
-    # Run equivalent of "python -m {package}"
-    runpy.run_module("{package}", run_name="__main__", alter_sys=True)
+    # Run equivalent of "python -m {main}"
+    runpy.run_module("{main}", run_name="__main__", alter_sys=True)
 """
 
 _SEPARATOR_HEAVY = (
@@ -61,13 +66,8 @@ class BundledFile(NamedTuple):
 
 class BundleMaker:
     """
-    The bundle maker combines the contents of several files into one Python
-    script. By default, the script only has a single variable, MANIFEST, which
-    is a dictionary mapping (relative) paths to byte offsets and lengths within
-    the bundle script. Optionally, it also includes the Bundle class, which
-    imports modules from the bundle script, and the corresponding bootstrap
-    code. Most methods of the bundle maker are generator methods yielding the
-    ines of the bundle script as newline-terminated bytestrings.
+    Class to create Python bundles, i.e., Python scripts that contains the source
+    code for several modules and supporting files.
     """
 
     def __init__(
@@ -76,15 +76,15 @@ class BundleMaker:
         *,
         bundle_only: bool = False,
         extensions: 'tuple[str, ...]' = _EXTENSIONS,
+        main: 'None | str' = None,
         output: 'None | str | Path' = None,
-        package: 'None | str' = None,
         repackage: bool = False,
     ) -> None:
         self._directories = directories
         self._bundle_only = bundle_only
         self._extensions = extensions
+        self._main = main
         self._output = output
-        self._package = package
         self._repackage = repackage
 
         self._ranges: 'list[tuple[str, int, int, int]]' = []
@@ -99,21 +99,23 @@ class BundleMaker:
     # ----------------------------------------------------------------------------------
 
     def run(self) -> None:
-        files = sorted(self.list_files(), key=attrgetter('key'))
-        package = None if self._bundle_only else self.main_package(files)
+        files = sorted(self.list_files(), key=lambda f: f.key) # type: ignore[misc]
+        main = None if self._bundle_only else self.select_main(files)
 
-        # Surprise, nullcontext[None] and BufferedWriter unify thusly:
-        context: 'AbstractContextManager[None | BufferedWriter]'
+        # context's type annotation is based on the observation that open()'s
+        # result is a BufferedWriter is an AbstractContextManager[BufferedWriter].
+        # The nullcontext prevents closing of stdout's binary stream when done.
+        context: 'AbstractContextManager[Writable]'
         if self._output is None:
-            context = nullcontext()
+            context = nullcontext(sys.stdout.buffer)
         else:
             context = open(self._output, mode='wb')
 
         with context as script:
             BundleMaker.writeall(self.emit_bundle(files), script)
             if not self._bundle_only:
-                assert package is not None
-                BundleMaker.writeall(self.emit_runtime(package), script)
+                assert main is not None
+                BundleMaker.writeall(self.emit_runtime(main), script)
 
     # ----------------------------------------------------------------------------------
 
@@ -147,26 +149,26 @@ class BundleMaker:
 
     # ----------------------------------------------------------------------------------
 
-    def main_package(self, files: 'list[BundledFile]') -> str:
-        if self._package is not None:
-            key = f'{self._package.replace(".", "/")}/__ main__.py'
-            if not any(key == file.key for file in files):
-                raise ValueError(
-                    f'package {self._package} has no __main__ module in bundle')
-            return self._package
+    def select_main(self, files: 'list[BundledFile]') -> str:
+        if self._main is not None:
+            base = self._main.replace('.', '/')
+            if any(f'{base}/__main__.py' == file.key for file in files):
+                return self._main
+            if any(f'{base}.py' == file.key for file in files):
+                return self._main
+            raise ValueError(
+                f'no package with __main__ module or module {self._main} in bundle')
 
         main_modules = [file.key for file in files if file.key.endswith('/__main__.py')]
         module_count = len(main_modules)
-
         if module_count == 0:
             raise ValueError('bundle has no __main__ module')
-        elif module_count == 1:
-            self._package = main_modules[0][:-12].replace('/', '.')
-            return self._package
-        else:
-            raise ValueError(
-                'bundle has several __main__ modules; '
-                'use -p/--package option to select one')
+        if module_count == 1:
+            self._main = main_modules[0][:-12].replace('/', '.')
+            return self._main
+        raise ValueError(
+                'bundle has more than one __main__ module; '
+                'use -m/--main option to select one')
 
     # ----------------------------------------------------------------------------------
 
@@ -182,6 +184,7 @@ class BundleMaker:
 
         yield from _BUNDLE_STOP.splitlines(keepends=True)
         yield from self.emit_manifest()
+        yield from self.emit_version()
 
     def emit_text_file(self, path: Path, key: str) -> 'Iterator[bytes]':
         lines = [
@@ -191,8 +194,6 @@ class BundleMaker:
             .replace(b'"', b'\\x22')  # and escape double quotes.
             for line in path.read_bytes().splitlines()
         ]
-
-        yield _SEPARATOR
 
         line_count = len(lines)
         byte_length = sum(len(line) for line in lines) + line_count
@@ -205,9 +206,11 @@ class BundleMaker:
             self.record_range(key, 0, 0, 0)
         elif line_count == 1:
             self.record_range(key, offset, byte_length + 4, 2)
+            yield _SEPARATOR
             yield prefix + b' b"' + lines[0] + b'\\n",\n'
         else:
             self.record_range(key, offset, byte_length + 7, 2)
+            yield _SEPARATOR
             yield prefix + b'\n'
             yield b'b"""' + lines[0] + b'\n'
             for line in lines[1:]:
@@ -217,7 +220,7 @@ class BundleMaker:
     def record_range(self, name: str, prefix: int, data: int, suffix: int) -> None:
         self._ranges.append((name, prefix, data, suffix))
 
-    def manifest_entries(self) -> 'Iterator[tuple[str, tuple[int, int]]]':
+    def list_manifest_entries(self) -> 'Iterator[tuple[str, tuple[int, int]]]':
         offset = len(_BANNER) + len(_BUNDLE_START_IFFY)
         for key, prefix, data, suffix in self._ranges:
             yield key, ((0, 0) if data == 0 else (offset + prefix, data))
@@ -226,16 +229,20 @@ class BundleMaker:
     def emit_manifest(self) -> 'Iterator[bytes]':
         yield _SEPARATOR_HEAVY
         yield b'\n'
-        yield b'MANIFEST = {\n'
-        for key, (offset, length) in self.manifest_entries():
+        yield b'__manifest__ = {\n'
+        for key, (offset, length) in self.list_manifest_entries():
             yield f'    "{key}": ({offset:_d}, {length:_d}),\n'.encode('utf8')
         yield b'}\n'
+
+    def emit_version(self) -> 'Iterator[bytes]':
+        yield b'\n'
+        yield f"__version__ = '{__version__}'\n".encode('ascii')
 
     # ----------------------------------------------------------------------------------
 
     def emit_runtime(
         self,
-        package: str,
+        main: str,
     ) -> 'Iterator[bytes]':
         yield b'\n'
         yield _SEPARATOR_HEAVY
@@ -244,12 +251,12 @@ class BundleMaker:
 
         yield _SEPARATOR_HEAVY
         if self._repackage:
-            repackage = b'bundle.repackage()'
+            repackage = "bundle.repackage()"
         else:
-            repackage = b'del sys.modules["__main__"]'
+            repackage = "del sys.modules['__main__']"
 
-        main = _MAIN.format(package=package, repackage=repackage)
-        yield from main.encode('utf8').splitlines(keepends=True)
+        main_block = _MAIN.format(main=main, repackage=repackage)
+        yield from main_block.encode('utf8').splitlines(keepends=True)
 
     def emit_tsutsumu_bundle(self) -> 'Iterator[bytes]':
         import tsutsumu
@@ -283,11 +290,11 @@ class BundleMaker:
     @staticmethod
     def writeall(
         lines: 'Iterator[bytes]',
-        file: 'None | BufferedWriter' = None,
+        writable: 'None | Writable' = None,
     ) -> None:
-        if file is None:
+        if writable is None:
             for line in lines:
                 print(line.decode('utf8'), end='')
         else:
             for line in lines:
-                file.write(line)
+                writable.write(line)
