@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # DO NOT EDIT! This script was automatically generated
-# by Tsutsumu <https://github.io/apparebit/tsutsumu>.
+# by Tsutsumu <https://github.com/apparebit/tsutsumu>.
 # Manual edits may just break it.
 
 if False: {
@@ -17,7 +17,7 @@ import traceback
 from .maker import BundleMaker
 
 
-if __name__ == '__main__':
+def parser() -> ArgumentParser:
     try:
         width = min(os.get_terminal_size()[0], 70)
     except:
@@ -25,15 +25,6 @@ if __name__ == '__main__':
 
     def width_limited_formatter(prog: str) -> HelpFormatter:
         return RawTextHelpFormatter(prog, width=width)
-
-    @dataclass
-    class ToolOptions:
-        bundle_only: bool = False
-        output: 'None | str' = None
-        package: 'None | str' = None
-        repackage: bool = False
-        verbose: bool = False
-        roots: 'list[str]' = field(default_factory=list)
 
     parser = ArgumentParser('tsutsumu',
         description=dedent(\x22\x22\x22
@@ -44,20 +35,29 @@ if __name__ == '__main__':
             tool skips directories and files that do not have valid Python
             module names.
 
-            By default, the bundle script executes a __main__ module just like
-            \x22python -m package\x22 does. If the bundled modules include exactly one
-            such __main__ module, that module is automatically selected.
-            Otherwise, please use the -p/--package option to specify the package
-            name.
+            By default, the generated script includes code for importing modules
+            from the bundle and for executing one of its modules, very much like
+            \x22python -m\x22 does. If the bundled modules include exactly one
+            __main__ module, Tsutsumu automatically selects that module. If
+            there are no or several such modules or you want to execute another
+            module, please use the -m/--main option to specify the module name.
 
-            Use the -b/--bundle-only option to omit the bundle runtime and
-            bootstrap code. That way, you can break your application into
-            several bundles.
+            You can use the -b/--bundle-only option to omit the bundle runtime
+            and bootstrap code from the generated script. That way, you can
+            break your application into several bundles. Though you probably
+            want to include that code with your application's primary bundle.
+            The application can then use `Bundle.exec_install()` to load and
+            install such secondary bundles and `Bundle.uninstall()` to uninstall
+            them again.
 
-            By default, the bundle script is written to standard out, which may
-            break the bundle script since Python's standard out is a character
-            instead of a byte stream. Use the -o/--output option to write to a
-            file directly.
+            Tsutsumu always generates the bundle script in binary format.
+            Re-encoding its output or even changing the line endings will likely
+            break the generated script! By default, the script is written to
+            standard out. Please use the -o/--output option to write to a file
+            instead.
+
+            Tsutsumu is \xc2\xa9 2023 Robert Grimm. It is licensed under Apache 2.0.
+            The source repository is <https://github.com/apparebit/tsutsumu>
         \x22\x22\x22),
         formatter_class=width_limited_formatter)
     parser.add_argument(
@@ -65,13 +65,14 @@ if __name__ == '__main__':
         action='store_true',
         help='emit only bundled files and their manifest,\\nno runtime code')
     parser.add_argument(
+        '-m', '--main',
+        metavar='MODULE',
+        help=\x22if a package, execute its __main__ module;\\n\x22
+        \x22if a module, execute this module\x22)
+    parser.add_argument(
         '-o', '--output',
         metavar='FILENAME',
-        help='write bundle script to this file')
-    parser.add_argument(
-        '-p', '--package',
-        metavar='PACKAGE',
-        help=\x22execute this package's __main__ module\x22)
+        help='write bundle to this file')
     parser.add_argument(
         '-r', '--repackage',
         action='store_true',
@@ -84,17 +85,31 @@ if __name__ == '__main__':
         'roots',
         metavar='PKGROOT', nargs='+',
         help=\x22include all Python modules reachable from\\nthe package's root directory\x22)
-    options = parser.parse_args(namespace=ToolOptions())
+    return parser
+
+
+@dataclass
+class ToolOptions:
+    bundle_only: bool = False
+    main: 'None | str' = None
+    output: 'None | str' = None
+    repackage: bool = False
+    verbose: bool = False
+    roots: 'list[str]' = field(default_factory=list)
+
+
+def main() -> None:
+    options = parser().parse_args(namespace=ToolOptions())
 
     try:
-        if options.bundle_only and (options.package or options.repackage):
-            raise ValueError('--bundle is incompatible with --package/--repackage')
+        if options.bundle_only and (options.main or options.repackage):
+            raise ValueError('--bundle is incompatible with --main/--repackage')
 
         BundleMaker(
             options.roots,
             bundle_only=options.bundle_only,
+            main=options.main,
             output=options.output,
-            package=options.package,
             repackage=options.repackage,
         ).run()
     except Exception as x:
@@ -103,14 +118,68 @@ if __name__ == '__main__':
         else:
             print(f'Error: {x}')
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
+""",
+# ------------------------------------------------------------------------------
+"tsutsumu/debug.py":
+b"""from pathlib import Path
+import sys
+from typing import cast
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print('Usage: python -m tsutsumu <path-to-bundle>')
+        sys.exit(1)
+
+    bundle = Path(sys.argv[1])
+    if bundle.suffix != '.py':
+        print(f'Error: bundle \x22{bundle}\x22 does not appear to be Python source code')
+        sys.exit(1)
+
+    bindings: 'dict[str, object]' = {}
+    exec(bundle.read_bytes(), bindings)
+
+    if '__manifest__' not in bindings:
+        print(f'Error: bundle \x22{bundle}\x22 does include __manifest__')
+        sys.exit(1)
+
+    manifest = cast(dict[str, tuple[int, int]], bindings['__manifest__'])
+    for key, (offset, length) in manifest.items():
+        if length == 0:
+            print(f'bundled file \x22{key}\x22 is empty')
+            continue
+
+        # A negative offset indicates a repackaged module file that is not
+        # embedded in a binary string literal on disk.
+        if offset < 0:
+            print(f'bundled file \x22{key}\x22 has been repackaged')
+
+        try:
+            with open(bundle, mode='rb') as file:
+                file.seek(offset if offset >= 0 else -offset)
+                data = file.read(length)
+
+            if offset >= 0:
+                data = eval(data)
+            print(f'bundled file \x22{key}\x22 has {len(data)} bytes')
+        except Exception as x:
+            print(f'bundled file \x22{key}\x22 is malformed:')
+            print(f'    {x}')
+            print()
+            for line in data.splitlines():
+                print(f'    {line!r}')
+            print()
 """,
 # ------------------------------------------------------------------------------
 "tsutsumu/maker.py":
 b"""from contextlib import nullcontext
 from keyword import iskeyword
-from operator import attrgetter
 import os.path
 from pathlib import Path
+import sys
 from typing import NamedTuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -118,15 +187,20 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from importlib.abc import Loader
     from importlib.machinery import ModuleSpec
-    from io import BufferedWriter
-    from typing import Callable
+    from typing import Callable, Protocol
+
+    class Writable(Protocol):
+        def write(self, data: 'bytes | bytearray') -> int:
+            ...
+
+from tsutsumu import __version__
 
 
 _BANNER = (
     b'#!/usr/bin/env python3\\n'
     b'# -*- coding: utf-8 -*-\\n'
     b'# DO NOT EDIT! This script was automatically generated\\n'
-    b'# by Tsutsumu <https://github.io/apparebit/tsutsumu>.\\n'
+    b'# by Tsutsumu <https://github.com/apparebit/tsutsumu>.\\n'
     b'# Manual edits may just break it.\\n\\n')
 
 # Both bundle starts must have the same length
@@ -144,13 +218,13 @@ if __name__ == \x22__main__\x22:
     Bundle.restrict_sys_path()
 
     # Install the bundle
-    bundle = Bundle.install(__file__, MANIFEST)
+    bundle = Bundle.install(__file__, __manifest__, __version__)
 
     # This script does not exist. It never ran!
     {repackage}
 
-    # Run equivalent of \x22python -m {package}\x22
-    runpy.run_module(\x22{package}\x22, run_name=\x22__main__\x22, alter_sys=True)
+    # Run equivalent of \x22python -m {main}\x22
+    runpy.run_module(\x22{main}\x22, run_name=\x22__main__\x22, alter_sys=True)
 \x22\x22\x22
 
 _SEPARATOR_HEAVY = (
@@ -169,13 +243,8 @@ class BundledFile(NamedTuple):
 
 class BundleMaker:
     \x22\x22\x22
-    The bundle maker combines the contents of several files into one Python
-    script. By default, the script only has a single variable, MANIFEST, which
-    is a dictionary mapping (relative) paths to byte offsets and lengths within
-    the bundle script. Optionally, it also includes the Bundle class, which
-    imports modules from the bundle script, and the corresponding bootstrap
-    code. Most methods of the bundle maker are generator methods yielding the
-    ines of the bundle script as newline-terminated bytestrings.
+    Class to create Python bundles, i.e., Python scripts that contains the source
+    code for several modules and supporting files.
     \x22\x22\x22
 
     def __init__(
@@ -184,15 +253,15 @@ class BundleMaker:
         *,
         bundle_only: bool = False,
         extensions: 'tuple[str, ...]' = _EXTENSIONS,
+        main: 'None | str' = None,
         output: 'None | str | Path' = None,
-        package: 'None | str' = None,
         repackage: bool = False,
     ) -> None:
         self._directories = directories
         self._bundle_only = bundle_only
         self._extensions = extensions
+        self._main = main
         self._output = output
-        self._package = package
         self._repackage = repackage
 
         self._ranges: 'list[tuple[str, int, int, int]]' = []
@@ -207,21 +276,23 @@ class BundleMaker:
     # ----------------------------------------------------------------------------------
 
     def run(self) -> None:
-        files = sorted(self.list_files(), key=attrgetter('key'))
-        package = None if self._bundle_only else self.main_package(files)
+        files = sorted(self.list_files(), key=lambda f: f.key) # type: ignore[misc]
+        main = None if self._bundle_only else self.select_main(files)
 
-        # Surprise, nullcontext[None] and BufferedWriter unify thusly:
-        context: 'AbstractContextManager[None | BufferedWriter]'
+        # context's type annotation is based on the observation that open()'s
+        # result is a BufferedWriter is an AbstractContextManager[BufferedWriter].
+        # The nullcontext prevents closing of stdout's binary stream when done.
+        context: 'AbstractContextManager[Writable]'
         if self._output is None:
-            context = nullcontext()
+            context = nullcontext(sys.stdout.buffer)
         else:
             context = open(self._output, mode='wb')
 
         with context as script:
             BundleMaker.writeall(self.emit_bundle(files), script)
             if not self._bundle_only:
-                assert package is not None
-                BundleMaker.writeall(self.emit_runtime(package), script)
+                assert main is not None
+                BundleMaker.writeall(self.emit_runtime(main), script)
 
     # ----------------------------------------------------------------------------------
 
@@ -255,26 +326,26 @@ class BundleMaker:
 
     # ----------------------------------------------------------------------------------
 
-    def main_package(self, files: 'list[BundledFile]') -> str:
-        if self._package is not None:
-            key = f'{self._package.replace(\x22.\x22, \x22/\x22)}/__ main__.py'
-            if not any(key == file.key for file in files):
-                raise ValueError(
-                    f'package {self._package} has no __main__ module in bundle')
-            return self._package
+    def select_main(self, files: 'list[BundledFile]') -> str:
+        if self._main is not None:
+            base = self._main.replace('.', '/')
+            if any(f'{base}/__main__.py' == file.key for file in files):
+                return self._main
+            if any(f'{base}.py' == file.key for file in files):
+                return self._main
+            raise ValueError(
+                f'no package with __main__ module or module {self._main} in bundle')
 
         main_modules = [file.key for file in files if file.key.endswith('/__main__.py')]
         module_count = len(main_modules)
-
         if module_count == 0:
             raise ValueError('bundle has no __main__ module')
-        elif module_count == 1:
-            self._package = main_modules[0][:-12].replace('/', '.')
-            return self._package
-        else:
-            raise ValueError(
-                'bundle has several __main__ modules; '
-                'use -p/--package option to select one')
+        if module_count == 1:
+            self._main = main_modules[0][:-12].replace('/', '.')
+            return self._main
+        raise ValueError(
+                'bundle has more than one __main__ module; '
+                'use -m/--main option to select one')
 
     # ----------------------------------------------------------------------------------
 
@@ -290,6 +361,7 @@ class BundleMaker:
 
         yield from _BUNDLE_STOP.splitlines(keepends=True)
         yield from self.emit_manifest()
+        yield from self.emit_version()
 
     def emit_text_file(self, path: Path, key: str) -> 'Iterator[bytes]':
         lines = [
@@ -299,8 +371,6 @@ class BundleMaker:
             .replace(b'\x22', b'\\\\x22')  # and escape double quotes.
             for line in path.read_bytes().splitlines()
         ]
-
-        yield _SEPARATOR
 
         line_count = len(lines)
         byte_length = sum(len(line) for line in lines) + line_count
@@ -313,9 +383,11 @@ class BundleMaker:
             self.record_range(key, 0, 0, 0)
         elif line_count == 1:
             self.record_range(key, offset, byte_length + 4, 2)
+            yield _SEPARATOR
             yield prefix + b' b\x22' + lines[0] + b'\\\\n\x22,\\n'
         else:
             self.record_range(key, offset, byte_length + 7, 2)
+            yield _SEPARATOR
             yield prefix + b'\\n'
             yield b'b\x22\x22\x22' + lines[0] + b'\\n'
             for line in lines[1:]:
@@ -325,7 +397,7 @@ class BundleMaker:
     def record_range(self, name: str, prefix: int, data: int, suffix: int) -> None:
         self._ranges.append((name, prefix, data, suffix))
 
-    def manifest_entries(self) -> 'Iterator[tuple[str, tuple[int, int]]]':
+    def list_manifest_entries(self) -> 'Iterator[tuple[str, tuple[int, int]]]':
         offset = len(_BANNER) + len(_BUNDLE_START_IFFY)
         for key, prefix, data, suffix in self._ranges:
             yield key, ((0, 0) if data == 0 else (offset + prefix, data))
@@ -334,16 +406,20 @@ class BundleMaker:
     def emit_manifest(self) -> 'Iterator[bytes]':
         yield _SEPARATOR_HEAVY
         yield b'\\n'
-        yield b'MANIFEST = {\\n'
-        for key, (offset, length) in self.manifest_entries():
+        yield b'__manifest__ = {\\n'
+        for key, (offset, length) in self.list_manifest_entries():
             yield f'    \x22{key}\x22: ({offset:_d}, {length:_d}),\\n'.encode('utf8')
         yield b'}\\n'
+
+    def emit_version(self) -> 'Iterator[bytes]':
+        yield b'\\n'
+        yield f\x22__version__ = '{__version__}'\\n\x22.encode('ascii')
 
     # ----------------------------------------------------------------------------------
 
     def emit_runtime(
         self,
-        package: str,
+        main: str,
     ) -> 'Iterator[bytes]':
         yield b'\\n'
         yield _SEPARATOR_HEAVY
@@ -352,12 +428,12 @@ class BundleMaker:
 
         yield _SEPARATOR_HEAVY
         if self._repackage:
-            repackage = b'bundle.repackage()'
+            repackage = \x22bundle.repackage()\x22
         else:
-            repackage = b'del sys.modules[\x22__main__\x22]'
+            repackage = \x22del sys.modules['__main__']\x22
 
-        main = _MAIN.format(package=package, repackage=repackage)
-        yield from main.encode('utf8').splitlines(keepends=True)
+        main_block = _MAIN.format(main=main, repackage=repackage)
+        yield from main_block.encode('utf8').splitlines(keepends=True)
 
     def emit_tsutsumu_bundle(self) -> 'Iterator[bytes]':
         import tsutsumu
@@ -391,23 +467,26 @@ class BundleMaker:
     @staticmethod
     def writeall(
         lines: 'Iterator[bytes]',
-        file: 'None | BufferedWriter' = None,
+        writable: 'None | Writable' = None,
     ) -> None:
-        if file is None:
+        if writable is None:
             for line in lines:
                 print(line.decode('utf8'), end='')
         else:
             for line in lines:
-                file.write(line)
+                writable.write(line)
 """,
 }
 
 # ==============================================================================
 
-MANIFEST = {
-    "tsutsumu/__main__.py": (308, 3_550),
-    "tsutsumu/maker.py": (3_962, 10_964),
+__manifest__ = {
+    "tsutsumu/__main__.py": (309, 4_319),
+    "tsutsumu/debug.py": (4_732, 1_589),
+    "tsutsumu/maker.py": (6_425, 11_141),
 }
+
+__version__ = '0.1.0'
 
 # ==============================================================================
 
@@ -431,12 +510,37 @@ class Bundle(Loader):
     """
 
     @classmethod
+    def exec_install(
+        cls,
+        path: 'str | Path',
+    ) -> 'Bundle':
+        with open(path, mode='rb') as file:
+            content = file.read()
+
+        if (
+            content.find(b'\nif False: {\n')
+            or content.find(b'=\n\n__manifest__ = {') == -1
+            or content.find(b'}\n\n__version__ = "') == -1
+        ):
+            raise ValueError(f'"{path}" does not appear to be a bundle')
+
+        bindings: 'dict[str, object]' = {}
+        exec(content, bindings)
+        # cast() would require backwards-compatible type value; comment seems simpler.
+        manifest: 'dict[str, tuple[int, int]]' = (
+            bindings['__manifest__']) # type: ignore[assignment]
+        version = cast(str, bindings['__version__'])
+
+        return cls.install(path, manifest, version)
+
+    @classmethod
     def install(
         cls,
         script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
+        version: str,
     ) -> 'Bundle':
-        bundle = Bundle(script, manifest)
+        bundle = Bundle(script, manifest, version)
         for finder in sys.meta_path:
             if bundle == finder:
                 raise ImportError(
@@ -448,6 +552,7 @@ class Bundle(Loader):
         self,
         script: 'str | Path',
         manifest: 'dict[str, tuple[int, int]]',
+        version: str,
     ) -> None:
         script = str(script)
         if not os.path.isabs(script):
@@ -464,7 +569,7 @@ class Bundle(Loader):
 
         self._script = script
         self._manifest = {intern(k): v for k, v in manifest.items()}
-        self._mod_bundle: 'None | str' = None
+        self._version = version
 
     def __hash__(self) -> int:
         return hash(self._script) + hash(self._manifest)
@@ -493,11 +598,12 @@ class Bundle(Loader):
             return b''
 
         with open(self._script, mode='rb') as file:
-            file.seek(offset)
+            # If the offset's sign is negative, the module is repackaged and its
+            # source is not embedded in a bytestring literal.
+            file.seek(offset if offset >= 0 else -offset)
             data = file.read(length)
             assert len(data) == length
-            # The source code for tsutsumu/bundle.py isn't a bytestring
-            return data[1:-1] if key == self._mod_bundle else cast(bytes, eval(data))
+            return data if offset < 0 else cast(bytes, eval(data))
 
     def _locate(
         self,
@@ -567,83 +673,85 @@ class Bundle(Loader):
         return self._locate(fullname)[0]
 
     def repackage(self) -> None:
-        if __name__ != '__main__':
-            Bundle.warn('attempt to repackage outside bundle script')
-            return
+        # Do not repackage if modules exist or their paths are listed in manifest!
+        if 'tsutsumu' in sys.modules or 'tsutsumu.bundle' in sys.modules:
+            raise ValueError('unable to repackage() already existing modules')
 
-        tsutsumu, tsutsumu_bundle = self._recreate_modules()
-        self._add_attributes(tsutsumu, tsutsumu_bundle)
-        self._add_to_manifest(tsutsumu, tsutsumu_bundle)
+        pkg_path = os.path.join(self._script, 'tsutsumu')
+        paths = [os.path.join(pkg_path, file) for file in ('__init__.py', 'bundle.py')]
+        if paths[0] in self._manifest or paths[1] in self._manifest:
+            raise ValueError('unable to repackage() modules already in manifest')
 
-        del sys.modules['__main__']
+        # Repackage: Create modules, add attributes, add to manifest.
+        package, bundle = self._repackage_create_modules(pkg_path, paths[0], paths[1])
+        self._repackage_add_attributes(package, bundle)
+        self._repackage_add_to_manifest(package, bundle)
 
-    def _recreate_modules(self) -> 'tuple[ModuleType, ModuleType]':
-        pkgdir = os.path.join(self._script, 'tsutsumu')
+        # If running as __main__ module, remove module.
+        if __name__ == '__main__':
+            del sys.modules['__main__']
 
-        for modname, filename, modpath in (
-            ('tsutsumu', '__init__.py', pkgdir),
-            ('tsutsumu.bundle', 'bundle.py', None),
+    def _repackage_create_modules(
+        self,
+        pkg_path: str,
+        init_path: str,
+        bundle_path: str,
+    ) -> 'tuple[ModuleType, ModuleType]':
+        for name, path, pkgdir in (
+            ('tsutsumu', init_path, pkg_path),
+            ('tsutsumu.bundle', bundle_path, None),
         ):
-            if modname in sys.modules:
-                Bundle.warn(f'module {modname} already exists')
-                continue
-
-            fullpath = os.path.join(pkgdir, filename)
-            spec = ModuleSpec(modname, self, origin=fullpath, is_package=bool(modpath))
-            if modpath:
+            spec = ModuleSpec(name, self, origin=path, is_package=bool(pkgdir))
+            if pkgdir:
                 assert spec.submodule_search_locations is not None
-                spec.submodule_search_locations.append(modpath)
+                spec.submodule_search_locations.append(pkgdir)
             module = importlib.util.module_from_spec(spec)
-            setattr(module, '__file__', fullpath)
-            sys.modules[modname] = module
+            setattr(module, '__file__', path)
+            sys.modules[name] = module
 
         return sys.modules['tsutsumu'], sys.modules['tsutsumu.bundle']
 
-    def _add_attributes(
+    def _repackage_add_attributes(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
     ) -> None:
-        for obj, attr, old, new in (
-            (tsutsumu, 'bundle', None, tsutsumu_bundle),
-            (tsutsumu_bundle, 'Bundle', None, Bundle),
-            (Bundle, '__module__', '__main__', 'tsutsumu.bundle'),
+        for obj, attr, value in (
+            (tsutsumu, '__version__', self._version),
+            (tsutsumu, 'bundle', tsutsumu_bundle),
+            (tsutsumu_bundle, 'Bundle', Bundle),
+            (Bundle, '__module__', 'tsutsumu.bundle'),
         ):
-            if old is None:
-                if hasattr(obj, attr):
-                    Bundle.warn(f'{obj} already has attribute {attr}')
-                    continue
-            else:
-                actual: 'None | str' = getattr(obj, attr, None)
-                if actual != old:
-                    Bundle.warn(f"{obj}.{attr} is {actual} instead of {old}")
-                    continue
-            setattr(obj, attr, new)
+            setattr(obj, attr, value)
 
-    def _add_to_manifest(
+    def _repackage_add_to_manifest(
         self,
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
     ) -> None:
-        if tsutsumu.__file__ in self._manifest:
-            Bundle.warn(f'manifest already includes "{tsutsumu.__file__}"')
-        else:
-            assert tsutsumu.__file__ is not None
-            self._manifest[tsutsumu.__file__] = (0, 0)
+        hr = b'# ' + b'=' * 78 + b'\n'
+        with open(self._script, mode='rb') as file:
+            content = file.read()
+        index = content.find(hr)
+        index = content.find(hr, index + len(hr))
+        init_start = content.rfind(b'__version__', 0, index)
+        init_length = index - 1 - init_start
+        bundle_start = index + len(hr) + 1
+        bundle_length = content.find(hr, bundle_start) - 1 - bundle_start
 
-        if tsutsumu_bundle.__file__ in self._manifest:
-            Bundle.warn(f'manifest already includes "{tsutsumu_bundle.__file__}"')
-        else:
-            hr = b'# ' + b'=' * 78 + b'\n'
-            with open(self._script, mode='rb') as file:
-                content = file.read()
-            start = content.find(hr)
-            start = content.find(hr, start + len(hr)) + len(hr)
-            stop = content.find(hr, start)
+        assert tsutsumu.__file__ is not None
+        self._manifest[tsutsumu.__file__] = (-init_start, init_length)
 
-            assert tsutsumu_bundle.__file__ is not None
-            self._mod_bundle = tsutsumu_bundle.__file__
-            self._manifest[self._mod_bundle] = (start, stop - start)
+        assert tsutsumu_bundle.__file__ is not None
+        self._manifest[tsutsumu_bundle.__file__] = (-bundle_start, bundle_length)
+
+    def uninstall(self) -> None:
+        index = 0
+        while index < len(sys.meta_path):
+            if self == sys.meta_path[index]:
+                del sys.meta_path[index]
+            else:
+                index += 1
 
     @staticmethod
     def restrict_sys_path() -> None:
@@ -673,10 +781,10 @@ if __name__ == "__main__":
     Bundle.restrict_sys_path()
 
     # Install the bundle
-    bundle = Bundle.install(__file__, MANIFEST)
+    bundle = Bundle.install(__file__, __manifest__, __version__)
 
     # This script does not exist. It never ran!
-    b'bundle.repackage()'
+    bundle.repackage()
 
     # Run equivalent of "python -m tsutsumu"
     runpy.run_module("tsutsumu", run_name="__main__", alter_sys=True)
