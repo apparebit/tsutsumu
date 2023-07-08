@@ -1,3 +1,4 @@
+import base64
 from importlib.abc import Loader
 from importlib.machinery import ModuleSpec
 import importlib.util
@@ -45,7 +46,7 @@ class Bundle(Loader):
     def install(
         cls,
         script: 'str | Path',
-        manifest: 'dict[str, tuple[int, int]]',
+        manifest: 'dict[str, tuple[str, int, int]]',
         version: str,
     ) -> 'Bundle':
         bundle = Bundle(script, manifest, version)
@@ -59,7 +60,7 @@ class Bundle(Loader):
     def __init__(
         self,
         script: 'str | Path',
-        manifest: 'dict[str, tuple[int, int]]',
+        manifest: 'dict[str, tuple[str, int, int]]',
         version: str,
     ) -> None:
         script = str(script)
@@ -99,19 +100,25 @@ class Bundle(Loader):
     def __getitem__(self, key: str) -> bytes:
         if not key in self._manifest:
             raise ImportError(f'unknown path "{key}"')
-        offset, length = self._manifest[key]
+        kind, offset, length = self._manifest[key]
 
         # The bundle dictionary does not include empty files
         if length == 0:
             return b''
 
         with open(self._script, mode='rb') as file:
-            # If the offset's sign is negative, the module is repackaged and its
-            # source is not embedded in a bytestring literal.
-            file.seek(offset if offset >= 0 else -offset)
+            file.seek(offset)
             data = file.read(length)
             assert len(data) == length
-            return data if offset < 0 else cast(bytes, eval(data))
+
+            if kind == 't':
+                return eval(data)
+            elif kind == 'b':
+                return base64.a85decode(eval(data))
+            elif kind == 'v':
+                return data
+            else:
+                raise ValueError(f'invalid kind "{kind}" for manifest entry')
 
     def _locate(
         self,
@@ -248,10 +255,10 @@ class Bundle(Loader):
         bundle_length = content.find(hr, bundle_start) - 1 - bundle_start
 
         assert tsutsumu.__file__ is not None
-        self._manifest[tsutsumu.__file__] = (-init_start, init_length)
+        self._manifest[tsutsumu.__file__] = ('v', init_start, init_length)
 
         assert tsutsumu_bundle.__file__ is not None
-        self._manifest[tsutsumu_bundle.__file__] = (-bundle_start, bundle_length)
+        self._manifest[tsutsumu_bundle.__file__] = ('v', bundle_start, bundle_length)
 
     def uninstall(self) -> None:
         index = 0

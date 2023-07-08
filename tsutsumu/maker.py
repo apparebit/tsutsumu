@@ -1,4 +1,6 @@
+import base64
 from contextlib import nullcontext
+from enum import Enum
 from keyword import iskeyword
 import os.path
 from pathlib import Path
@@ -31,7 +33,38 @@ _BUNDLE_START_IFFY = b'if False: {\n'
 _BUNDLE_START_DICT = b'BUNDLE  = {\n'
 _BUNDLE_STOP = b'}\n\n'
 
-_EXTENSIONS = ('.css', '.html', '.js', '.md', '.py', '.rst', '.txt')
+_BINARY_EXTENSIONS = (
+    '.jpg',
+    '.png',
+)
+
+_BINARY_FILES = ()
+
+_TEXT_EXTENSIONS = (
+    '.cfg',
+    '.json',
+    '.md',
+    '.py',
+    '.rst',
+    '.toml',
+    '.txt',
+
+    '.patch',
+
+    '.css',
+    '.html',
+    '.js',
+    '.svg',
+)
+
+_TEXT_FILES = (
+    '.editorconfig',
+    '.gitattributes',
+    '.gitignore',
+    'LICENSE',
+    'Makefile',
+    'py.typed',
+)
 
 _MAIN = """
 if __name__ == "__main__":
@@ -58,8 +91,15 @@ _SEPARATOR = (
     b'---------------------------------------\n')
 
 
+class FileKind(Enum):
+    BINARY = 'b'
+    TEXT = 't'
+    VALUE = 'v'
+
+
 class BundledFile(NamedTuple):
     """The local path and the platform-independent key for a bundled file."""
+    kind: FileKind
     path: Path
     key: str
 
@@ -75,19 +115,26 @@ class BundleMaker:
         directories: 'Sequence[str | Path]',
         *,
         bundle_only: bool = False,
-        extensions: 'tuple[str, ...]' = _EXTENSIONS,
+        binary_extensions: 'tuple[str, ...]' = _BINARY_EXTENSIONS,
+        binary_files: 'tuple[str, ...]' = _BINARY_FILES,
+        text_extensions: 'tuple[str, ...]' = _TEXT_EXTENSIONS,
+        text_files: 'tuple[str, ...]' = _TEXT_FILES,
         main: 'None | str' = None,
         output: 'None | str | Path' = None,
         repackage: bool = False,
     ) -> None:
         self._directories = directories
         self._bundle_only = bundle_only
-        self._extensions = extensions
         self._main = main
         self._output = output
         self._repackage = repackage
 
-        self._ranges: 'list[tuple[str, int, int, int]]' = []
+        self._binary_extensions = set(binary_extensions)
+        self._binary_files = set(binary_files)
+        self._text_extensions = set(text_extensions)
+        self._text_files = set(text_files)
+
+        self._ranges: 'list[tuple[FileKind, str, int, int, int]]' = []
         self._repr: 'None | str' = None
 
     def __repr__(self) -> str:
@@ -127,19 +174,27 @@ class BundleMaker:
             pending = list(root.iterdir())
             while pending:
                 item = pending.pop().absolute()
-                if self.is_text_file(item) and BundleMaker.is_module_name(item.stem):
+                if item.is_file() and BundleMaker.is_module_name(item.stem):
+                    kind = self.classify_kind(item)
+                    if kind is None:
+                        continue
                     key = str(item.relative_to(root.parent)).replace('\\', '/')
                     if not self.is_excluded_key(key):
-                        yield BundledFile(item, key)
+                        yield BundledFile(kind, item, key)
                 elif item.is_dir() and BundleMaker.is_module_name(item.name):
                     pending.extend(item.iterdir())
-
-    def is_text_file(self, item: Path) -> bool:
-        return item.is_file() and item.suffix in self._extensions
 
     @staticmethod
     def is_module_name(name: str) -> bool:
         return name.isidentifier() and not iskeyword(name)
+
+    def classify_kind(self, path: Path) -> 'None | FileKind':
+        if path.suffix in self._binary_extensions or path.name in self._binary_files:
+            return FileKind.BINARY
+        elif path.suffix in self._text_extensions or path.name in self._text_files:
+            return FileKind.TEXT
+        else:
+            return None
 
     def is_excluded_key(self, key: str) -> bool:
         return (
@@ -180,58 +235,82 @@ class BundleMaker:
         yield from _BUNDLE_START_IFFY.splitlines(keepends=True)
 
         for file in files:
-            yield from self.emit_text_file(file.path, file.key)
+            yield from self.emit_file(file.kind, file.path, file.key)
 
         yield from _BUNDLE_STOP.splitlines(keepends=True)
         yield from self.emit_manifest()
         yield from self.emit_version()
 
-    def emit_text_file(self, path: Path, key: str) -> 'Iterator[bytes]':
-        lines = [
-            line                      # Split bytestring into lines,
-            .decode('iso8859-1')      # convert each byte 1:1 to code point,
-            .encode('unicode_escape') # convert to bytes with non-ASCII values escaped,
-            .replace(b'"', b'\\x22')  # and escape double quotes.
-            for line in path.read_bytes().splitlines()
-        ]
+    def emit_file(self, kind: 'FileKind', path: Path, key: str) -> 'Iterator[bytes]':
+        if kind is FileKind.TEXT:
+            lines = [
+                line                      # Split bytestring into lines,
+                .decode('iso8859-1')      # convert each byte 1:1 to code point,
+                .encode('unicode_escape') # convert to bytes, escaping non-ASCII values
+                .replace(b'"', b'\\x22')  # and escape double quotes.
+                for line in path.read_bytes().splitlines()
+            ]
+        else:
+            lines = base64.a85encode(path.read_bytes(), wrapcol=76).splitlines()
 
         line_count = len(lines)
         byte_length = sum(len(line) for line in lines) + line_count
 
+        if line_count == 0:
+            assert byte_length == 0
+            self.record_range(kind, key, 0, 0, 0)
+            return
+
         prefix = b'"' + key.encode('utf8') + b'":'
         offset = len(_SEPARATOR) + len(prefix) + 1
 
-        if line_count == 0:
-            assert byte_length == 0
-            self.record_range(key, 0, 0, 0)
-        elif line_count == 1:
-            self.record_range(key, offset, byte_length + 4, 2)
-            yield _SEPARATOR
+        yield _SEPARATOR
+
+        if line_count == 1:
+            if kind is FileKind.TEXT:
+                self.record_range(kind, key, offset, byte_length + 4, 2)
+            else:
+                self.record_range(kind, key, offset + 2, byte_length + 1, 3)
+
             yield prefix + b' b"' + lines[0] + b'\\n",\n'
         else:
-            self.record_range(key, offset, byte_length + 7, 2)
-            yield _SEPARATOR
+            if kind is FileKind.TEXT:
+                self.record_range(kind, key, offset, byte_length + 7, 2)
+                first_line = b'b"""' + lines[0]
+            else:
+                self.record_range(kind, key, offset + 4, byte_length + 1, 5)
+                prefix += b' b"""'
+                first_line = lines[0]
+
             yield prefix + b'\n'
-            yield b'b"""' + lines[0] + b'\n'
+            yield first_line + b'\n'
             for line in lines[1:]:
                 yield line + b'\n'
             yield b'""",\n'
 
-    def record_range(self, name: str, prefix: int, data: int, suffix: int) -> None:
-        self._ranges.append((name, prefix, data, suffix))
+    def record_range(
+        self,
+        kind: 'FileKind',
+        name: str,
+        prefix: int,
+        data: int,
+        suffix: int,
+    ) -> None:
+        self._ranges.append((kind, name, prefix, data, suffix))
 
-    def list_manifest_entries(self) -> 'Iterator[tuple[str, tuple[int, int]]]':
+    def list_manifest_entries(self) -> 'Iterator[tuple[str, tuple[str, int, int]]]':
         offset = len(_BANNER) + len(_BUNDLE_START_IFFY)
-        for key, prefix, data, suffix in self._ranges:
-            yield key, ((0, 0) if data == 0 else (offset + prefix, data))
+        for kind, key, prefix, data, suffix in self._ranges:
+            yield key, ((kind, 0, 0) if data == 0 else (kind, offset + prefix, data))
             offset += prefix + data + suffix
 
     def emit_manifest(self) -> 'Iterator[bytes]':
         yield _SEPARATOR_HEAVY
         yield b'\n'
         yield b'__manifest__ = {\n'
-        for key, (offset, length) in self.list_manifest_entries():
-            yield f'    "{key}": ({offset:_d}, {length:_d}),\n'.encode('utf8')
+        for key, (kind, offset, length) in self.list_manifest_entries():
+            entry = f'    "{key}": ("{kind.value}", {offset:_d}, {length:_d}),\n'
+            yield entry.encode('utf8')
         yield b'}\n'
 
     def emit_version(self) -> 'Iterator[bytes]':

@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 import sys
 from typing import cast
@@ -20,24 +21,28 @@ if __name__ == '__main__':
         sys.exit(1)
 
     manifest = cast(dict[str, tuple[int, int]], bindings['__manifest__'])
-    for key, (offset, length) in manifest.items():
+    for key, (kind, offset, length) in manifest.items():
         if length == 0:
             print(f'bundled file "{key}" is empty')
             continue
 
-        # A negative offset indicates a repackaged module file that is not
-        # embedded in a binary string literal on disk.
-        if offset < 0:
-            print(f'bundled file "{key}" has been repackaged')
-
         try:
             with open(bundle, mode='rb') as file:
-                file.seek(offset if offset >= 0 else -offset)
+                file.seek(offset)
                 data = file.read(length)
 
-            if offset >= 0:
+            if kind == 'b':
+                data = base64.a85decode(eval(data))
+            elif kind == 't':
                 data = eval(data)
+            elif kind == 'v':
+                data = data
+            else:
+                print(f'manifest entry with invalid kind "{kind}"')
+                continue
+
             print(f'bundled file "{key}" has {len(data)} bytes')
+
         except Exception as x:
             print(f'bundled file "{key}" is malformed:')
             print(f'    {x}')
