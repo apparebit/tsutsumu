@@ -1,11 +1,12 @@
 #!.venv/bin/python
 
+import base64
 import doctest
 from pathlib import Path
 import subprocess
 import shutil
 import sys
-from typing import TYPE_CHECKING
+from typing import cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import TextIO
@@ -57,7 +58,8 @@ def main() -> None:
     # ----------------------------------------------------------------------------------
 
     console.info('Running documentation tests...')
-    doc_failures, doc_tests = doctest.testfile('README.md')
+    doc_failures, doc_tests = doctest.testfile(
+        'README.md', optionflags=doctest.REPORT_NDIFF)
 
     if doc_failures != 0:
         console.error(f'{doc_failures}/{doc_tests} documentation tests failed!')
@@ -151,6 +153,40 @@ def main() -> None:
 
     # ----------------------------------------------------------------------------------
 
+    console.info('Validating bundled binary file...')
+    reference_bacon = (cwd / 'spam' / 'bacon.jpg').read_bytes()
+
+    err_count = 0
+    for index in range(1, 4):
+        filename = f'can{index}.py'
+        can_path = tmpdir / filename
+        bindings: 'dict[str, object]' = {}
+        exec(can_path.read_bytes(), bindings)
+
+        kind, offset, length = bindings['__manifest__']['spam/bacon.jpg']
+        if kind != 'b':
+            console.detail(f'Bundled image in tmp/{filename} has kind "{kind}", not "b"')
+            err_count += 1
+
+        with open(can_path, mode='rb') as file:
+            file.seek(offset)
+            canned_bacon = file.read(length)
+            canned_bacon = base64.a85decode(canned_bacon)
+
+        if reference_bacon == canned_bacon:
+            console.detail(f'Bundled image in tmp/{filename} is the same as original')
+        else:
+            console.detail(f'Bundled image in tmp/{filename} differs from original')
+            console.detail(f' - Original has {len(reference_bacon):,d} bytes')
+            console.detail(f' - Bundled image has {len(canned_bacon):,d} bytes')
+            err_count += 1
+
+    if err_count > 0:
+        console.error(f'Bundling of binary files is broken.')
+        sys.exit(1)
+
+    # ----------------------------------------------------------------------------------
+
     console.info('Checking repackaged tsutsumu modules...')
     result = subprocess.run([
             sys.executable,
@@ -162,6 +198,31 @@ def main() -> None:
     if result.returncode != 0:
         console.error('Repackaged modules differ from originals!')
         sys.exit(1)
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('After passing all tests, rebuilding bundles...')
+
+    subprocess.run([
+            sys.executable,
+            '-m', 'tsutsumu',
+            '-o', str(cwd / 'bundles' / 'can.py'),
+            'spam'
+        ],
+        check=True
+    )
+    console.detail('Rebuilt bundles/can.py')
+
+    subprocess.run([
+            sys.executable,
+            '-m', 'tsutsumu',
+            '-o', str(cwd / 'bundles' / 'bundler.py'),
+            '-r',
+            'tsutsumu'
+        ],
+        check=True
+    )
+    console.detail('Rebuilt bundles/bundler.py')
 
     # ----------------------------------------------------------------------------------
 
