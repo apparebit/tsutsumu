@@ -120,7 +120,8 @@ provide the critical two classes that do all the heavy lifting. Hence I'll be
 focusing on them in this section. To illustrate their workings, I rely on the
 `spam` package also contained in Tsutsumu's source repository. In addition to
 its own `__init__` package module, the package contains two Python modules,
-`__main__` and `bacon`, as well as a very stylish webpage, `ham.html`.
+`__main__` and `bacon`, as well as a very stylish webpage, `ham.html`, that also
+includes an image, `bacon.jpg`.
 
 All subsequent code examples have been validated with Python's `doctest` tool.
 Running the tool over this file is part of Tsutsumu's [test
@@ -159,17 +160,19 @@ for `spam`:
 ...
 spam/__init__.py
 spam/__main__.py
+spam/bacon.jpg
 spam/bacon.py
 spam/ham.html
 >>>
 ```
 
-Those are just the four files we expect:
+Those are just the five files we expect:
 
   * `spam/__init__.py` contains `spam`'s package module;
   * `spam/__main__.py` is the package's main entry point;
-  * `spam/bacon.poy` contains the `spam.bacon` submodule;
-  * `spam/ham.html` is a package resource.
+  * `spam/bacon.jpg` is a package resource;
+  * `spam/bacon.py` contains the `spam.bacon` submodule;
+  * `spam/ham.html` is a package resource, too.
 
 
 ### 3.1 Layout of Bundled Files
@@ -195,34 +198,41 @@ if False: {
 >>>
 ```
 
-I'm not sure whether CPython actually takes this use case into account during
-parsing. In fact, I'd be surprised if it did. However, I also do know that
-Donald Knuth's TeX (which dates back to the late 1970s) does optimize just this
-case: Once TeX knows that a conditional branch is not taken, it scans upcoming
-tokens, taking only `\if` (and variations thereof), `\else`, and `\fi` into
-account, until it has found the end of the branch, resuming regular processing
-thereafter.
+I don't know whether CPython does optimize parsing along those lines. Though I
+do know that Donald Knuth's TeX (which dates back to the late 1970s) does
+optimize just this case: Once TeX knows that a conditional branch is not taken,
+it simply scans upcoming tokens, taking only `\if` (and variations thereof),
+`\else`, and `\fi` into account, until it has found the end of the branch, after
+which TeX resumes regular processing.
 
-In the hope that Python is just as clever, we next emit the dictionary contents
-as file name, content pairs for each bundled file. We start with
-`spam/__init__.py`:
+Let's hope that Python is just as clever and fill in the file name, content
+pairs for each bundled file. We start with `spam/__init__.py`:
 
 ```py
->>> writeall(maker.emit_text_file(*files[0]))
+>>> writeall(maker.emit_file(*files[0]))
 # ------------------------------------------------------------------------------
 "spam/__init__.py": b"print('spam/__init__.py')\n",
 >>>
 ```
 
-As illustrated above, the file name or key is a `str` literal, whereas the file
-contents are a `bytes` literal. The latter is more appropriate for file contents
-because files store bytestrings, too. That means that bundle maker is yielding
-lines of bytestrings that contain string and bytestring literals both. Ooh...
+As shown, the file name or key is a `str` literal, whereas the file contents are
+`bytes`. We use bytes instead of characters for the latter because, at their
+most basic, files are just that, bytestrings. We get characters only after
+decoding, nowadays typically from UTF-8.
 
-Let's process the other three files:
+Beware of bytestring literals in Python: They are limited to ASCII characters
+and require that all other code points be escaped. In other words, the majority
+of code points in bytestring literals must be escaped. That would make for a
+rather verbose encoding if values were more evenly distributed. However, in the
+case of Tsutsumu, the bundled files are mostly text files, in particular Python
+source code. That strongly biases bundled files towards ASCII and makes this an
+efficient and human-readable encoding.
+
+The `spam` package's `__main__` module isn't so different from the `__init__`
+module, except that it takes up several lines and hence uses triple-quotes:
 
 ```py
->>> writeall(maker.emit_text_file(*files[1]))
+>>> writeall(maker.emit_file(*files[1]))
 # ------------------------------------------------------------------------------
 "spam/__main__.py":
 b"""print('spam/__main__.py')
@@ -230,10 +240,38 @@ import spam.bacon
 <BLANKLINE>
 print('also:', __file__)
 """,
->>> writeall(maker.emit_text_file(*files[2]))
+>>>
+```
+
+Unlike the other files in the bundle, the next file contains bitmap image and
+hence is binary. Its contents are represented by a bytestring literal too, but
+the contents have been encoded in Base85. For readability, the literal adds
+newlines every 76 characters. By design, Base85 uses only ASCII characters and
+hence there should be no escape sequences in the bytestring literals for binary
+files.
+
+```py
+>>> writeall(maker.emit_file(*files[2]))   # doctest: +ELLIPSIS
+# ------------------------------------------------------------------------------
+"spam/bacon.jpg": b"""
+s4IA0!"_al8O`[\!<<,,!42_+s5<sN7<iNY!!#_f!%IsK!!iQ.!>5A7!!!!"!!*'"!?(qA!!!!"!
+!!!k!?2"B!!!!"!!!!s!AOQU!!!!5!!!"&LM6_k!!!!"!!!":z!!!#+!!!!"!!!#+!!!!"6"FnCA
+KXHVEb0H5Ebf_=6W5c@!!Akp!!<3$!!*'#!!&Yn!!E9%!!*'"!;`>j!!E9%!!*'"!/U[U!!*&d!'
+!egDffo=BQ%i41G1?]3'p22"9\])z3'p22"=4$J!!!!1e/aM$NrZHgl$s)-m.`nrs1eUH#QT\]q?
+...
+>>>
+```
+
+Note that the complete encoded image is larger than what would fit into four
+measly lines of Base85, a bit more than 13,000 bytes larger.
+
+For the fourth and fifth file, we are back to text again:
+
+```py
+>>> writeall(maker.emit_file(*files[3]))
 # ------------------------------------------------------------------------------
 "spam/bacon.py": b"print('spam/bacon.py')\n",
->>> writeall(maker.emit_text_file(*files[3]))
+>>> writeall(maker.emit_file(*files[4]))
 # ------------------------------------------------------------------------------
 "spam/ham.html":
 b"""<!DOCTYPE html>
@@ -254,18 +292,26 @@ body {
     justify-content: center;
     align-content: center;
 }
+img {
+    height: calc(15vmin + 1vmax);
+    width: auto;
+    display: block;
+    position: relative;
+    left: -20%;
+    top: 40%;
+}
 p {
     font-family: system-ui, sans-serif;
-    font-size: calc(32vmin + 4vmax);
+    font-size: calc(30vmin + 3vmax);
     font-weight: bolder;
 }
 </style>
-<p>Ham!
+<img src=bacon.jpg><p>Ham!
 """,
 >>>
 ```
 
-Now we can close the dictionary again:
+With that, we can close the dictionary again:
 
 ```py
 >>> writeall(tsutsumu.maker._BUNDLE_STOP.splitlines(keepends=True))
@@ -302,10 +348,11 @@ with the offset and length for each file included in the bundle:
 # ==============================================================================
 <BLANKLINE>
 __manifest__ = {
-    "spam/__init__.py": (305, 30),
-    "spam/__main__.py": (438, 77),
-    "spam/bacon.py": (615, 27),
-    "spam/ham.html": (742, 382),
+    "spam/__init__.py": ("t", 305, 30),
+    "spam/__main__.py": ("t", 438, 77),
+    "spam/bacon.jpg": ("b", 620, 13_003),
+    "spam/bacon.py": ("t", 13_726, 27),
+    "spam/ham.html": ("t", 13_853, 534),
 }
 >>>
 ```
@@ -326,7 +373,7 @@ runtime reads a file such as `spam/bacon.py`:
 
 ```py
 >>> with open('bundles/can.py', mode='rb') as file:
-...     _ = file.seek(615)
+...     _ = file.seek(13_726)
 ...     data = file.read(27)
 ...
 >>> data
@@ -393,6 +440,7 @@ Let's see how that plays out in practice on the example of the `can.py` bundle:
 ...
 spam/__init__.py
 spam/__main__.py
+spam/bacon.jpg
 spam/bacon.py
 spam/ham.html
 >>>
@@ -456,6 +504,7 @@ Ok. But what about the bundle using absolute paths?
 ...
 spam/__init__.py
 spam/__main__.py
+spam/bacon.jpg
 spam/bacon.py
 spam/ham.html
 >>>
@@ -573,7 +622,7 @@ seen wide usage, I'd hold off on mission-critical deployments for now.
 Meanwhile, Tsutsumu could use a few more features. I can think of three:
 
   * [ ] Automatically determine module dependencies
-  * [ ] Support inclusion of binary files in bundles
+  * [x] Support inclusion of binary files in bundles
   * [ ] Support the bundling of namespace packages
 
 What else?
