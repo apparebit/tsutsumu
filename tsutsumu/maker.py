@@ -8,7 +8,7 @@ import sys
 from typing import NamedTuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
     from contextlib import AbstractContextManager
     from importlib.abc import Loader
     from importlib.machinery import ModuleSpec
@@ -21,17 +21,8 @@ if TYPE_CHECKING:
 from tsutsumu import __version__
 
 
-_BANNER = (
-    b'#!/usr/bin/env python3\n'
-    b'# -*- coding: utf-8 -*-\n'
-    b'# DO NOT EDIT! This script was automatically generated\n'
-    b'# by Tsutsumu <https://github.com/apparebit/tsutsumu>.\n'
-    b'# Manual edits may just break it.\n\n')
-
-# Both bundle starts must have the same length
-_BUNDLE_START_IFFY = b'if False: {\n'
-_BUNDLE_START_DICT = b'BUNDLE  = {\n'
-_BUNDLE_STOP = b'}\n\n'
+# --------------------------------------------------------------------------------------
+# File names and extensions acceptable for bundling
 
 _BINARY_EXTENSIONS = (
     '.jpg',
@@ -66,15 +57,30 @@ _TEXT_FILES = (
     'py.typed',
 )
 
-_MAIN = """
+# --------------------------------------------------------------------------------------
+# Bundle code snippets
+
+_BANNER = (
+    b'#!/usr/bin/env python3\n'
+    b'# -*- coding: utf-8 -*-\n'
+    b'# DO NOT EDIT! This script was automatically generated\n'
+    b'# by Tsutsumu <https://github.com/apparebit/tsutsumu>.\n'
+    b'# Manual edits may just break it.\n\n')
+
+# Both bundle starts must have the same length
+_BUNDLE_START = b'if False: {\n'
+_BUNDLE_STOP = b'}\n\n'
+_EMPTY_LINE = b'\n'
+
+_MAIN = """\
 if __name__ == "__main__":
     import runpy
 
     # Don't load modules from current directory
-    Bundle.restrict_sys_path()
+    Toolbox.restrict_sys_path()
 
     # Install the bundle
-    bundle = Bundle.install(__file__, __manifest__, __version__)
+    bundle = Bundle.install(__file__, __version__, __manifest__)
 
     # This script does not exist. It never ran!
     {repackage}
@@ -83,13 +89,10 @@ if __name__ == "__main__":
     runpy.run_module("{main}", run_name="__main__", alter_sys=True)
 """
 
-_SEPARATOR_HEAVY = (
-    b'# ======================================='
-    b'=======================================\n')
-_SEPARATOR = (
-    b'# ---------------------------------------'
-    b'---------------------------------------\n')
+_SEPARATOR_HEAVY = b'# ' + b'=' * 78 + b'\n\n'
+_SEPARATOR = b'# ' + b'-' * 78 + b'\n'
 
+# --------------------------------------------------------------------------------------
 
 class FileKind(Enum):
     BINARY = 'b'
@@ -159,7 +162,9 @@ class BundleMaker:
             context = open(self._output, mode='wb')
 
         with context as script:
+            BundleMaker.writeall(_BANNER.splitlines(keepends=True), script)
             BundleMaker.writeall(self.emit_bundle(files), script)
+            BundleMaker.writeall(self.emit_meta_data(), script)
             if not self._bundle_only:
                 assert main is not None
                 BundleMaker.writeall(self.emit_runtime(main), script)
@@ -231,15 +236,10 @@ class BundleMaker:
         self,
         files: 'list[BundledFile]',
     ) -> 'Iterator[bytes]':
-        yield from _BANNER.splitlines(keepends=True)
-        yield from _BUNDLE_START_IFFY.splitlines(keepends=True)
-
+        yield from _BUNDLE_START.splitlines(keepends=True)
         for file in files:
             yield from self.emit_file(file.kind, file.path, file.key)
-
         yield from _BUNDLE_STOP.splitlines(keepends=True)
-        yield from self.emit_manifest()
-        yield from self.emit_version()
 
     def emit_file(self, kind: 'FileKind', path: Path, key: str) -> 'Iterator[bytes]':
         if kind is FileKind.TEXT:
@@ -298,24 +298,31 @@ class BundleMaker:
     ) -> None:
         self._ranges.append((kind, name, prefix, data, suffix))
 
-    def list_manifest_entries(self) -> 'Iterator[tuple[str, tuple[str, int, int]]]':
-        offset = len(_BANNER) + len(_BUNDLE_START_IFFY)
+    # ----------------------------------------------------------------------------------
+
+    def emit_meta_data(self) -> 'Iterator[bytes]':
+        yield _SEPARATOR_HEAVY
+        yield from self.emit_version()
+        yield _EMPTY_LINE
+        yield from self.emit_manifest()
+
+    def emit_version(self) -> 'Iterator[bytes]':
+        yield f"__version__ = '{__version__}'\n".encode('ascii')
+
+    def list_manifest_entries(
+        self
+    ) -> 'Iterator[tuple[str, tuple[FileKind, int, int]]]':
+        offset = len(_BANNER) + len(_BUNDLE_START)
         for kind, key, prefix, data, suffix in self._ranges:
             yield key, ((kind, 0, 0) if data == 0 else (kind, offset + prefix, data))
             offset += prefix + data + suffix
 
     def emit_manifest(self) -> 'Iterator[bytes]':
-        yield _SEPARATOR_HEAVY
-        yield b'\n'
         yield b'__manifest__ = {\n'
         for key, (kind, offset, length) in self.list_manifest_entries():
             entry = f'    "{key}": ("{kind.value}", {offset:_d}, {length:_d}),\n'
             yield entry.encode('utf8')
         yield b'}\n'
-
-    def emit_version(self) -> 'Iterator[bytes]':
-        yield b'\n'
-        yield f"__version__ = '{__version__}'\n".encode('ascii')
 
     # ----------------------------------------------------------------------------------
 
@@ -323,16 +330,13 @@ class BundleMaker:
         self,
         main: str,
     ) -> 'Iterator[bytes]':
-        yield b'\n'
+        yield _EMPTY_LINE
         yield _SEPARATOR_HEAVY
-        yield b'\n'
         yield from self.emit_tsutsumu_bundle()
 
         yield _SEPARATOR_HEAVY
-        if self._repackage:
-            repackage = "bundle.repackage()"
-        else:
-            repackage = "del sys.modules['__main__']"
+        repackage = 'bundle.repackage()\n    ' if self._repackage else ''
+        repackage += "del sys.modules['__main__']"
 
         main_block = _MAIN.format(main=main, repackage=repackage)
         yield from main_block.encode('utf8').splitlines(keepends=True)
@@ -362,13 +366,13 @@ class BundleMaker:
                     mod_bundle = file.read()
 
         yield from mod_bundle.splitlines(keepends=True)
-        yield b'\n'
+        yield _EMPTY_LINE
 
     # ----------------------------------------------------------------------------------
 
     @staticmethod
     def writeall(
-        lines: 'Iterator[bytes]',
+        lines: 'Iterable[bytes]',
         writable: 'None | Writable' = None,
     ) -> None:
         if writable is None:
