@@ -228,6 +228,8 @@ p {
 
 # ==============================================================================
 
+__version__ = '0.2.0'
+
 __manifest__ = {
     "spam/__init__.py": ("t", 305, 30),
     "spam/__main__.py": ("t", 438, 77),
@@ -235,8 +237,6 @@ __manifest__ = {
     "spam/bacon.py": ("t", 13_726, 27),
     "spam/ham.html": ("t", 13_853, 534),
 }
-
-__version__ = '0.2.0'
 
 # ==============================================================================
 
@@ -252,6 +252,99 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
     from types import CodeType, ModuleType
+    from typing import TypeAlias
+
+    ManifestType: TypeAlias = dict[str, tuple[str, int, int]]
+
+
+class Toolbox:
+    HRULE = b'# ' + b'=' * 78 + b'\n'
+
+    @staticmethod
+    def create_module_spec(
+        name: str, loader: 'Loader', path: str, pkgdir: 'None | str'
+    ) -> ModuleSpec:
+        spec = ModuleSpec(name, loader, origin=path, is_package=bool(pkgdir))
+        if pkgdir:
+            assert spec.submodule_search_locations is not None
+            spec.submodule_search_locations.append(pkgdir)
+        return spec
+
+    @staticmethod
+    def create_module(
+        name: str, loader: 'Loader', path: str, pkgdir: 'None | str'
+    ) -> 'ModuleType':
+        spec = Toolbox.create_module_spec(name, loader, path, pkgdir)
+        module = importlib.util.module_from_spec(spec)
+        setattr(module, '__file__', path)
+        sys.modules[name] = module
+        return module
+
+    @staticmethod
+    def find_section_offsets(bundle: bytes) -> tuple[int, int, int]:
+        # Search from back is safe and if bundled data > this module, also faster.
+        index3 = bundle.rfind(Toolbox.HRULE)
+        index2 = bundle.rfind(Toolbox.HRULE, 0, index3 - 1)
+        index1 = bundle.rfind(Toolbox.HRULE, 0, index2 - 1)
+        return index1, index2, index3
+
+    @staticmethod
+    def load_meta_data(path: 'str | Path') -> 'tuple[str, ManifestType]':
+        with open(path, mode='rb') as file:
+            content = file.read()
+
+        start, stop, _ = Toolbox.find_section_offsets(content)
+        bindings: 'dict[str, object]' = {}
+        exec(content[start + len(Toolbox.HRULE) : stop], bindings)
+        version = cast(str, bindings['__version__'])
+        # cast() would require backwards-compatible type value; comment seems simpler.
+        manifest: 'ManifestType' = bindings['__manifest__'] # type: ignore[assignment]
+        return version, manifest
+
+    @staticmethod
+    def load_from_bundle(
+        path: 'str | Path',
+        kind: str,
+        offset: int,
+        length: int
+    ) -> bytes:
+        data = Toolbox.read(path, offset, length)
+        if kind == 't':
+            return cast(bytes, eval(data))
+        elif kind == 'b':
+            return base64.a85decode(data)
+        elif kind == 'v':
+            return data
+        else:
+            raise ValueError(f'invalid kind "{kind}" for manifest entry')
+
+    @staticmethod
+    def read(path: 'str | Path', offset: int, length: int) -> bytes:
+        if length == 0:
+            return b''
+        with open(path, mode='rb') as file:
+            file.seek(offset)
+            data = file.read(length)
+            assert len(data) == length
+            return data
+
+    @staticmethod
+    def restrict_sys_path() -> None:
+        # TODO: Remove virtual environment paths, too!
+        cwd = os.getcwd()
+        bad_paths = {'', cwd}
+
+        main = sys.modules['__main__']
+        if hasattr(main, '__file__'):
+            bad_paths.add(os.path.dirname(cast(str, main.__file__)))
+
+        index = 0
+        while index < len(sys.path):
+            path = sys.path[index]
+            if path in bad_paths:
+                del sys.path[index]
+            else:
+                index += 1
 
 
 class Bundle(Loader):
@@ -261,49 +354,25 @@ class Bundle(Loader):
     """
 
     @classmethod
-    def exec_install(
+    def install_from_file(
         cls,
         path: 'str | Path',
     ) -> 'Bundle':
-        with open(path, mode='rb') as file:
-            content = file.read()
-
-        if (
-            content.find(b'\nif False: {\n')
-            or content.find(b'=\n\n__manifest__ = {') == -1
-            or content.find(b'}\n\n__version__ = "') == -1
-        ):
-            raise ValueError(f'"{path}" does not appear to be a bundle')
-
-        bindings: 'dict[str, object]' = {}
-        exec(content, bindings)
-        # cast() would require backwards-compatible type value; comment seems simpler.
-        manifest: 'dict[str, tuple[int, int]]' = (
-            bindings['__manifest__']) # type: ignore[assignment]
-        version = cast(str, bindings['__version__'])
-
-        return cls.install(path, manifest, version)
+        version, manifest = Toolbox.load_meta_data(path)
+        return cls.install(path, version, manifest)
 
     @classmethod
     def install(
-        cls,
-        script: 'str | Path',
-        manifest: 'dict[str, tuple[str, int, int]]',
-        version: str,
+        cls, script: 'str | Path', version: str, manifest: 'ManifestType',
     ) -> 'Bundle':
-        bundle = Bundle(script, manifest, version)
-        for finder in sys.meta_path:
-            if bundle == finder:
-                raise ImportError(
-                    f'bind "{bundle._script}" is already installed')
+        bundle = cls(script, version, manifest)
+        if bundle in sys.meta_path:
+            raise ImportError(f'bundle for "{bundle._script}" already installed')
         sys.meta_path.insert(0, bundle)
         return bundle
 
     def __init__(
-        self,
-        script: 'str | Path',
-        manifest: 'dict[str, tuple[str, int, int]]',
-        version: str,
+        self, script: 'str | Path', version: str, manifest: 'ManifestType',
     ) -> None:
         script = str(script)
         if not os.path.isabs(script):
@@ -319,8 +388,8 @@ class Bundle(Loader):
             return os.path.join(script, local_path)
 
         self._script = script
-        self._manifest = {intern(k): v for k, v in manifest.items()}
         self._version = version
+        self._manifest = {intern(k): v for k, v in manifest.items()}
 
     def __hash__(self) -> int:
         return hash(self._script) + hash(self._manifest)
@@ -330,6 +399,7 @@ class Bundle(Loader):
             return False
         return (
             self._script == other._script
+            and self._version == other._version
             and self._manifest == other._manifest
         )
 
@@ -343,47 +413,39 @@ class Bundle(Loader):
         if not key in self._manifest:
             raise ImportError(f'unknown path "{key}"')
         kind, offset, length = self._manifest[key]
-
-        # The bundle dictionary does not include empty files
-        if length == 0:
-            return b''
-
-        with open(self._script, mode='rb') as file:
-            file.seek(offset)
-            data = file.read(length)
-            assert len(data) == length
-
-            if kind == 't':
-                return eval(data)
-            elif kind == 'b':
-                return base64.a85decode(eval(data))
-            elif kind == 'v':
-                return data
-            else:
-                raise ValueError(f'invalid kind "{kind}" for manifest entry')
+        return Toolbox.load_from_bundle(self._script, kind, offset, length)
 
     def _locate(
         self,
         fullname: str,
-        paths: 'None | Sequence[str]' = None,
+        search_paths: 'None | Sequence[str]' = None,
     ) -> 'tuple[str, None | str]':
-        if paths is None:
-            prefixes = [os.path.join(
+        if search_paths is None:
+            base_paths = [os.path.join(
                 self._script,
                 fullname.replace('.', os.sep)
             )]
         else:
             modname = fullname.rpartition('.')[2]
-            prefixes = [os.path.join(path, modname) for path in paths]
+            base_paths = [os.path.join(path, modname) for path in search_paths]
 
         for suffix, is_pkg in (
             (os.sep + '__init__.py', True),
             ('.py', False),
         ):
-            for prefix in prefixes:
-                fullpath = prefix + suffix
-                if fullpath in self._manifest:
-                    return fullpath, (prefix if is_pkg else None)
+            for base_path in base_paths:
+                full_path = base_path + suffix
+                if full_path in self._manifest:
+                    return full_path, (base_path if is_pkg else None)
+
+        # It's not a regular module or package, but could be a namespace package
+        # (see https://github.com/python/cpython/blob/3.11/Lib/zipimport.py#L171)
+
+        for base_path in base_paths:
+            prefix = base_path + os.sep
+            for key in self._manifest:
+                if key.startswith(prefix):
+                    return base_path, base_path
 
         raise ImportError(
             f'No such module {fullname} in bundle {self._script}')
@@ -391,19 +453,14 @@ class Bundle(Loader):
     def find_spec(
         self,
         fullname: str,
-        path: 'None | Sequence[str]' = None,
+        search_paths: 'None | Sequence[str]' = None,
         target: 'None | ModuleType' = None,
     ) -> 'None | ModuleSpec':
         try:
-            fullpath, modpath = self._locate(fullname, path)
+            return Toolbox.create_module_spec(
+                fullname, self, *self._locate(fullname, search_paths))
         except ImportError:
             return None
-
-        spec = ModuleSpec(fullname, self, origin=fullpath, is_package=bool(modpath))
-        if modpath:
-            assert spec.submodule_search_locations is not None
-            spec.submodule_search_locations.append(modpath)
-        return spec
 
     def create_module(self, spec: ModuleSpec) -> 'None | ModuleType':
         return None
@@ -430,56 +487,26 @@ class Bundle(Loader):
         return self._locate(fullname)[0]
 
     def repackage(self) -> None:
-        # Do not repackage if modules exist or their paths are listed in manifest!
+        # Check sys.modules and self._manifest to prevent duplicates
         if 'tsutsumu' in sys.modules or 'tsutsumu.bundle' in sys.modules:
             raise ValueError('unable to repackage() already existing modules')
 
-        pkg_path = os.path.join(self._script, 'tsutsumu')
-        paths = [os.path.join(pkg_path, file) for file in ('__init__.py', 'bundle.py')]
-        if paths[0] in self._manifest or paths[1] in self._manifest:
+        pkgdir = os.path.join(self._script, 'tsutsumu')
+        paths = [os.path.join(pkgdir, file) for file in ('__init__.py', 'bundle.py')]
+        if any(path in self._manifest for path in paths):
             raise ValueError('unable to repackage() modules already in manifest')
 
-        # Repackage: Create modules, add attributes, add to manifest.
-        package, bundle = self._repackage_create_modules(pkg_path, paths[0], paths[1])
-        self._repackage_add_attributes(package, bundle)
-        self._repackage_add_to_manifest(package, bundle)
+        # Recreate modules and add them to manifest
+        tsutsumu = Toolbox.create_module('tsutsumu', self, paths[0], pkgdir)
+        tsutsumu_bundle = Toolbox.create_module('tsutsumu.bundle', self, paths[1], None)
 
-        # If running as __main__ module, remove module.
-        if __name__ == '__main__':
-            del sys.modules['__main__']
+        setattr(tsutsumu, '__version__', self._version)
+        setattr(tsutsumu, 'bundle', tsutsumu_bundle)
+        setattr(tsutsumu_bundle, 'Toolbox', Toolbox)
+        setattr(tsutsumu_bundle, 'Bundle', Bundle)
+        Bundle.__module__ = Toolbox.__module__ = 'tsutsumu.bundle'
 
-    def _repackage_create_modules(
-        self,
-        pkg_path: str,
-        init_path: str,
-        bundle_path: str,
-    ) -> 'tuple[ModuleType, ModuleType]':
-        for name, path, pkgdir in (
-            ('tsutsumu', init_path, pkg_path),
-            ('tsutsumu.bundle', bundle_path, None),
-        ):
-            spec = ModuleSpec(name, self, origin=path, is_package=bool(pkgdir))
-            if pkgdir:
-                assert spec.submodule_search_locations is not None
-                spec.submodule_search_locations.append(pkgdir)
-            module = importlib.util.module_from_spec(spec)
-            setattr(module, '__file__', path)
-            sys.modules[name] = module
-
-        return sys.modules['tsutsumu'], sys.modules['tsutsumu.bundle']
-
-    def _repackage_add_attributes(
-        self,
-        tsutsumu: 'ModuleType',
-        tsutsumu_bundle: 'ModuleType',
-    ) -> None:
-        for obj, attr, value in (
-            (tsutsumu, '__version__', self._version),
-            (tsutsumu, 'bundle', tsutsumu_bundle),
-            (tsutsumu_bundle, 'Bundle', Bundle),
-            (Bundle, '__module__', 'tsutsumu.bundle'),
-        ):
-            setattr(obj, attr, value)
+        self._repackage_add_to_manifest(tsutsumu, tsutsumu_bundle)
 
     def _repackage_add_to_manifest(
         self,
@@ -503,31 +530,7 @@ class Bundle(Loader):
         self._manifest[tsutsumu_bundle.__file__] = ('v', bundle_start, bundle_length)
 
     def uninstall(self) -> None:
-        index = 0
-        while index < len(sys.meta_path):
-            if self == sys.meta_path[index]:
-                del sys.meta_path[index]
-            else:
-                index += 1
-
-    @staticmethod
-    def restrict_sys_path() -> None:
-        # FIXME: Maybe, we should disable venv paths, too?!
-        cwd = os.getcwd()
-
-        index = 0
-        while index < len(sys.path):
-            path = sys.path[index]
-            if path == '' or path == cwd:
-                del sys.path[index]
-            else:
-                index += 1
-
-    @staticmethod
-    def warn(message: str) -> None:
-        # Assuming that warnings are infrequent, delay import until use.
-        import warnings
-        warnings.warn(message)
+        sys.meta_path.remove(self)
 
 # ==============================================================================
 
@@ -535,10 +538,10 @@ if __name__ == "__main__":
     import runpy
 
     # Don't load modules from current directory
-    Bundle.restrict_sys_path()
+    Toolbox.restrict_sys_path()
 
     # Install the bundle
-    bundle = Bundle.install(__file__, __manifest__, __version__)
+    bundle = Bundle.install(__file__, __version__, __manifest__)
 
     # This script does not exist. It never ran!
     del sys.modules['__main__']
