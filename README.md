@@ -193,7 +193,7 @@ it only inside an `if False:` branch.
 
 ```py
 >>> writeall = tsutsumu.maker.BundleMaker.writeall
->>> writeall(tsutsumu.maker._BUNDLE_START_IFFY.splitlines(keepends=True))
+>>> writeall(tsutsumu.maker._BUNDLE_START.splitlines(keepends=True))
 if False: {
 >>>
 ```
@@ -345,8 +345,6 @@ with the offset and length for each file included in the bundle:
 
 ```py
 >>> writeall(maker.emit_manifest())
-# ==============================================================================
-<BLANKLINE>
 __manifest__ = {
     "spam/__init__.py": ("t", 305, 30),
     "spam/__main__.py": ("t", 438, 77),
@@ -457,7 +455,7 @@ might inadvertently import the `spam` package from its sources and get mightily
 confused. (Not that that ever happened to me...)
 
 ```py
->>> bundles.can.Bundle.restrict_sys_path()
+>>> bundles.can.Toolbox.restrict_sys_path()
 >>> import spam
 Traceback (most recent call last):
   File "<stdin>", line 1, in <module>
@@ -471,7 +469,7 @@ No more readily available `spam`? Time to open `bundles.can`:
 >>> from pathlib import Path
 >>> can_path = Path('.').absolute() / 'bundles' / 'can.py'
 >>> version = bundles.can.__version__
->>> can_content = bundles.can.Bundle.install(can_path, manifest, version)
+>>> can_content = bundles.can.Bundle.install(can_path, version, manifest)
 >>> import spam
 spam/__init__.py
 >>>
@@ -622,7 +620,7 @@ seen wide usage, I'd hold off on mission-critical deployments for now.
 Meanwhile, Tsutsumu could use a few more features. I can think of three:
 
   * [ ] Automatically determine module dependencies
-  * [x] Support inclusion of binary files in bundles
+  * [x] Support inclusion of binary files in bundles (added in v0.2.0)
   * [ ] Support the bundling of namespace packages
 
 What else?

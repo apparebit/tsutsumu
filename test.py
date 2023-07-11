@@ -2,6 +2,7 @@
 
 import base64
 import doctest
+import importlib
 from pathlib import Path
 import subprocess
 import shutil
@@ -39,6 +40,7 @@ class Console:
     def error(self, message: str) -> None:
         self._stream.write(f'{self.sgr(self.RED)}{message}{self.sgr(self.RESET)}\n')
 
+# ======================================================================================
 
 def main() -> None:
     console = Console(sys.stdout)
@@ -49,25 +51,12 @@ def main() -> None:
 
     try:
         import tsutsumu
+        from tsutsumu.bundle import Toolbox
     except ImportError:
         console.error('Unable to import tsutsumu')
         sys.exit(1)
 
     console.detail(f'Testing tsutsumu {tsutsumu.__version__}')
-
-    # ----------------------------------------------------------------------------------
-
-    console.info('Running documentation tests...')
-    doc_failures, doc_tests = doctest.testfile(
-        'README.md', optionflags=doctest.REPORT_NDIFF)
-
-    if doc_failures != 0:
-        console.error(f'{doc_failures}/{doc_tests} documentation tests failed!')
-        sys.exit(1)
-
-    console.detail(f'All {doc_tests} documentation tests passed')
-
-    # ----------------------------------------------------------------------------------
 
     cwd = Path('.').absolute()
     tmpdir = cwd / 'tmp'
@@ -77,132 +66,9 @@ def main() -> None:
 
     # ----------------------------------------------------------------------------------
 
-    console.info('Bundling tsutsumu twice...')
-    subprocess.run([
-            sys.executable,
-            '-m', 'tsutsumu',
-            '-o', str(tmpdir / 'bundler.py'),
-            'tsutsumu',
-        ],
-        check=True
-    )
-    console.detail('Created tmp/bundler.py')
+    console.info('Rebuilding repository bundles...')
 
-    subprocess.run([
-            sys.executable,
-            '-m', 'tsutsumu',
-            '-r',
-            '-o', str(tmpdir / 'repackaged_bundler.py'),
-            'tsutsumu',
-        ],
-        check=True
-    )
-    console.detail('Created tmp/repackaged_bundler.py')
-
-    # ----------------------------------------------------------------------------------
-
-    console.info('Bundling spam thrice...')
-    subprocess.run([
-            sys.executable,
-            '-m', 'tsutsumu',
-            '-o', str(tmpdir / 'can1.py'),
-            'spam'
-        ],
-        check=True
-    )
-    console.detail('Created tmp/can1.py with tsutsumu package')
-
-    subprocess.run([
-            sys.executable,
-            str(tmpdir / 'bundler.py'),
-            '-o', str(tmpdir / 'can2.py'),
-            'spam'
-        ],
-        check=True
-    )
-    console.detail('Created tmp/can2.py with bundled tsutsumu')
-
-    subprocess.run([
-            sys.executable,
-            str(tmpdir / 'repackaged_bundler.py'),
-            '-o', str(tmpdir / 'can3.py'),
-            'spam'
-        ],
-        check=True
-    )
-    console.detail('Created tmp/can3.py with repackaged tsutsumu')
-
-    # ----------------------------------------------------------------------------------
-
-    console.info('Comparing cans of spam...')
-    files = [(tmpdir/ f'can{index}.py').read_bytes() for index in range(1, 4)]
-
-    mismatch = False
-    if files[0] != files[1]:
-        console.detail('tmp/can1.py and tmp/can2.py differ')
-        mismatch = True
-    if files[0] != files[2]:
-        console.detail('tmp/can1.py and tmp/can3.py differ')
-        mismatch = True
-    if mismatch:
-        console.error(
-            'Regular and bundled versions of Tsutsumu generated different bundles!')
-        sys.exit(1)
-
-    console.detail('All three cans contain the exact same spam')
-
-    # ----------------------------------------------------------------------------------
-
-    console.info('Validating bundled binary file...')
-    reference_bacon = (cwd / 'spam' / 'bacon.jpg').read_bytes()
-
-    err_count = 0
-    for index in range(1, 4):
-        filename = f'can{index}.py'
-        can_path = tmpdir / filename
-        bindings: 'dict[str, object]' = {}
-        exec(can_path.read_bytes(), bindings)
-
-        kind, offset, length = bindings['__manifest__']['spam/bacon.jpg']
-        if kind != 'b':
-            console.detail(f'Bundled image in tmp/{filename} has kind "{kind}", not "b"')
-            err_count += 1
-
-        with open(can_path, mode='rb') as file:
-            file.seek(offset)
-            canned_bacon = file.read(length)
-            canned_bacon = base64.a85decode(canned_bacon)
-
-        if reference_bacon == canned_bacon:
-            console.detail(f'Bundled image in tmp/{filename} is the same as original')
-        else:
-            console.detail(f'Bundled image in tmp/{filename} differs from original')
-            console.detail(f' - Original has {len(reference_bacon):,d} bytes')
-            console.detail(f' - Bundled image has {len(canned_bacon):,d} bytes')
-            err_count += 1
-
-    if err_count > 0:
-        console.error(f'Bundling of binary files is broken.')
-        sys.exit(1)
-
-    # ----------------------------------------------------------------------------------
-
-    console.info('Checking repackaged tsutsumu modules...')
-    result = subprocess.run([
-            sys.executable,
-            'test.py',
-            'repackaged-module-test'
-        ],
-    )
-
-    if result.returncode != 0:
-        console.error('Repackaged modules differ from originals!')
-        sys.exit(1)
-
-    # ----------------------------------------------------------------------------------
-
-    console.info('After passing all tests, rebuilding bundles...')
-
+    # This bundle must be regenerated before documentation test, which uses it.
     subprocess.run([
             sys.executable,
             '-m', 'tsutsumu',
@@ -226,37 +92,168 @@ def main() -> None:
 
     # ----------------------------------------------------------------------------------
 
+    console.info('Running documentation tests...')
+
+    # Since documentation test uses bundles/can.py, we regenerate it first.
+    doc_failures, doc_tests = doctest.testfile(
+        'README.md', optionflags=doctest.REPORT_NDIFF)
+
+    if doc_failures != 0:
+        console.error(f'{doc_failures}/{doc_tests} documentation tests failed!')
+        sys.exit(1)
+
+    console.detail(f'All {doc_tests} documentation tests passed')
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('Bundling Tsutsumu without and with repackaging...')
+    subprocess.run([
+            sys.executable,
+            '-m', 'tsutsumu',
+            '-o', str(tmpdir / 'bundler.py'),
+            'tsutsumu',
+        ],
+        check=True
+    )
+    console.detail('Created tmp/bundler.py')
+
+    subprocess.run([
+            sys.executable,
+            '-m', 'tsutsumu',
+            '-r',
+            '-o', str(tmpdir / 'repackaged-bundler.py'),
+            'tsutsumu',
+        ],
+        check=True
+    )
+    console.detail('Created tmp/repackaged-bundler.py')
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('Bundling spam with regular, bundled, and repackaged Tsutsumu...')
+    subprocess.run([
+            sys.executable,
+            '-m', 'tsutsumu',
+            '-o', str(tmpdir / 'can1.py'),
+            'spam'
+        ],
+        check=True
+    )
+    console.detail('Created tmp/can1.py with regular Tsutsumu')
+
+    subprocess.run([
+            sys.executable,
+            str(tmpdir / 'bundler.py'),
+            '-o', str(tmpdir / 'can2.py'),
+            'spam'
+        ],
+        check=True
+    )
+    console.detail('Created tmp/can2.py with bundled tsutsumu')
+
+    subprocess.run([
+            sys.executable,
+            str(tmpdir / 'repackaged-bundler.py'),
+            '-o', str(tmpdir / 'can3.py'),
+            'spam'
+        ],
+        check=True
+    )
+    console.detail('Created tmp/can3.py with repackaged tsutsumu')
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('Comparing cans of bundled spam...')
+    files = [(tmpdir/ f'can{index}.py').read_bytes() for index in range(1, 4)]
+
+    mismatch = False
+    if files[0] != files[1]:
+        console.detail('tmp/can1.py and tmp/can2.py differ')
+        mismatch = True
+    if files[0] != files[2]:
+        console.detail('tmp/can1.py and tmp/can3.py differ')
+        mismatch = True
+    if mismatch:
+        console.error(
+            'Regular and bundled versions of Tsutsumu generated different bundles!')
+        sys.exit(1)
+
+    console.detail('All three cans contain the exact same spam!')
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('Comparing bundled binary file to original...')
+    original = (cwd / 'spam' / 'bacon.jpg').read_bytes()
+
+    err_count = 0
+    for index in range(1, 4):
+        filename = f'can{index}.py'
+        path = tmpdir / filename
+
+        manifest = Toolbox.load_meta_data(path)[1]
+        kind, offset, length = manifest['spam/bacon.jpg']
+        if kind != 'b':
+            console.detail(
+                f'Bundled image in "tmp/{filename}" has kind "{kind}", not "b"')
+            err_count += 1
+
+        canned_bacon = Toolbox.load_from_bundle(path, kind, offset, length)
+        if original == canned_bacon:
+            console.detail(f'Bundled image in "tmp/{filename}" is the same as original')
+        else:
+            console.detail(f'Bundled image in "tmp/{filename}" differs from original:')
+            lines = Toolbox.read(path, offset, length).splitlines()
+            for line in lines[:3]:
+                console.detail(f'    {line!r}')
+            console.detail('    ...')
+            err_count += 1
+
+    if err_count > 0:
+        console.error(f'Bundling of binary files is broken!')
+        sys.exit(1)
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('Comparing repackaged Tsutsumu modules to originals...')
+    result = subprocess.run([
+            sys.executable,
+            'test.py',
+            'run-repackaged-module-test'
+        ],
+    )
+
+    if result.returncode != 0:
+        console.error('Repackaged modules differ from originals!')
+        sys.exit(1)
+
+    # ----------------------------------------------------------------------------------
+
     console.success('W00t! All tests passed!')
 
     shutil.rmtree(tmpdir)
     sys.exit(0)
 
+# ======================================================================================
 
 def repackaged_module_test() -> None:
+    from tsutsumu.bundle import Bundle, Toolbox
+
     cwd = Path('.').absolute()
+    repackaged_path = cwd / 'tmp' / 'repackaged-bundler.py'
 
-    # Importing repackaged_bundler does not execute bootstrap code,
-    # since it is not the __main__ module.
-    import tmp.repackaged_bundler # type: ignore
 
-    # Extract __manifest__, __version__, and Bundle from module.
-    repackaged_bundle_path = cwd / 'tmp' / 'repackaged_bundler.py'
-    manifest = tmp.repackaged_bundler.__manifest__
-    version = tmp.repackaged_bundler.__version__
-    Bundle = tmp.repackaged_bundler.Bundle
-
-    # Install bundle and repackage.
-    bundle = Bundle.install(repackaged_bundle_path, manifest, version)
+    version, manifest = Toolbox.load_meta_data(repackaged_path)
+    bundle = Bundle.install(repackaged_path, version, manifest)
     bundle.repackage()
 
     # Compare repackaged modules to their originals.
-    original_path = cwd / 'tsutsumu'
-    repackaged_path = repackaged_bundle_path / 'tsutsumu'
+    package_path = cwd / 'tsutsumu'
+    bundled_package_path = repackaged_path / 'tsutsumu'
 
     code = 0
     for module in ('__init__.py', 'bundle.py'):
-        original = (original_path / module).read_bytes()
-        repackaged = bundle[str(repackaged_path / module)]
+        original = (package_path / module).read_bytes()
+        repackaged = bundle[str(bundled_package_path / module)]
         if original == repackaged:
             print(f'Repackaged "tsutsumu/{module}" matched original')
         else:
@@ -268,7 +265,7 @@ def repackaged_module_test() -> None:
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == 'repackaged-module-test':
+    if len(sys.argv) > 1 and sys.argv[1] == 'run-repackaged-module-test':
         repackaged_module_test()
     else:
         main()
