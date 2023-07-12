@@ -1,16 +1,12 @@
 #!.venv/bin/python
 
-import base64
 import doctest
-import importlib
 from pathlib import Path
 import subprocess
 import shutil
 import sys
-from typing import cast, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from typing import TextIO
+import traceback
+from typing import TextIO
 
 
 class Console:
@@ -63,6 +59,21 @@ def main() -> None:
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     tmpdir.mkdir()
+
+    # ----------------------------------------------------------------------------------
+
+    console.info('Testing distribution metadata ingestion...')
+    from tsutsumu.requirement import parse_requirement
+
+    for requirement, expected_result in (
+        ('spam', ('spam', None, None, None)),
+        ('spam [ can ,label]', ('spam', ['can', 'label'], None, None)),
+        ('spam >6.6.5, < 6.6.6', ('spam', None, ['>6.6.5', '< 6.6.6'], None)),
+        ('spam ; extra == "can"', ('spam', None, None, 'can')),
+    ):
+        result = parse_requirement(requirement)
+        print(result)
+        assert parse_requirement(requirement) == expected_result
 
     # ----------------------------------------------------------------------------------
 
@@ -236,12 +247,24 @@ def main() -> None:
 # ======================================================================================
 
 def repackaged_module_test() -> None:
-    from tsutsumu.bundle import Bundle, Toolbox
-
+    # We cannot import Bundle and Toolbox without also importing tsutsumu's
+    # __init__ and bundle modules, which breaks repackage(). At the same time,
+    # we can still read, compile, and exec the bundle module.
     cwd = Path('.').absolute()
+
+    mod_bundle_path = cwd / 'tsutsumu' / 'bundle.py'
+    mod_bundle_binary = compile(
+        mod_bundle_path.read_bytes(),
+        mod_bundle_path,
+        'exec',
+        dont_inherit=True,
+    )
+    mod_bundle_bindings = dict()
+    exec(mod_bundle_binary, mod_bundle_bindings)
+    Toolbox = mod_bundle_bindings['Toolbox']
+    Bundle = mod_bundle_bindings['Bundle']
+
     repackaged_path = cwd / 'tmp' / 'repackaged-bundler.py'
-
-
     version, manifest = Toolbox.load_meta_data(repackaged_path)
     bundle = Bundle.install(repackaged_path, version, manifest)
     bundle.repackage()
@@ -265,7 +288,10 @@ def repackaged_module_test() -> None:
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == 'run-repackaged-module-test':
-        repackaged_module_test()
-    else:
-        main()
+    try:
+        if len(sys.argv) > 1 and sys.argv[1] == 'run-repackaged-module-test':
+            repackaged_module_test()
+        else:
+            main()
+    except Exception as x:
+        traceback.print_exception(x)
