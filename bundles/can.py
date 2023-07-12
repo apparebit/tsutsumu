@@ -258,7 +258,8 @@ if TYPE_CHECKING:
 
 
 class Toolbox:
-    HRULE = b'# ' + b'=' * 78 + b'\n'
+    HEAVY_RULE = b'# ' + b'=' * 78 + b'\n\n'
+    PLAIN_RULE = b'# ' + b'-' * 78 + b'\n'
 
     @staticmethod
     def create_module_spec(
@@ -266,7 +267,8 @@ class Toolbox:
     ) -> ModuleSpec:
         spec = ModuleSpec(name, loader, origin=path, is_package=bool(pkgdir))
         if pkgdir:
-            assert spec.submodule_search_locations is not None
+            if spec.submodule_search_locations is None:
+                raise AssertionError(f'module spec for {name} is not for package')
             spec.submodule_search_locations.append(pkgdir)
         return spec
 
@@ -283,9 +285,9 @@ class Toolbox:
     @staticmethod
     def find_section_offsets(bundle: bytes) -> tuple[int, int, int]:
         # Search from back is safe and if bundled data > this module, also faster.
-        index3 = bundle.rfind(Toolbox.HRULE)
-        index2 = bundle.rfind(Toolbox.HRULE, 0, index3 - 1)
-        index1 = bundle.rfind(Toolbox.HRULE, 0, index2 - 1)
+        index3 = bundle.rfind(Toolbox.HEAVY_RULE)
+        index2 = bundle.rfind(Toolbox.HEAVY_RULE, 0, index3 - 1)
+        index1 = bundle.rfind(Toolbox.HEAVY_RULE, 0, index2 - 1)
         return index1, index2, index3
 
     @staticmethod
@@ -295,7 +297,7 @@ class Toolbox:
 
         start, stop, _ = Toolbox.find_section_offsets(content)
         bindings: 'dict[str, object]' = {}
-        exec(content[start + len(Toolbox.HRULE) : stop], bindings)
+        exec(content[start + len(Toolbox.HEAVY_RULE) : stop], bindings)
         version = cast(str, bindings['__version__'])
         # cast() would require backwards-compatible type value; comment seems simpler.
         manifest: 'ManifestType' = bindings['__manifest__'] # type: ignore[assignment]
@@ -325,8 +327,9 @@ class Toolbox:
         with open(path, mode='rb') as file:
             file.seek(offset)
             data = file.read(length)
-            assert len(data) == length
-            return data
+        if len(data) != length:
+            raise AssertionError(f'actual length {len(data):,} is not {length:,}')
+        return data
 
     @staticmethod
     def restrict_sys_path() -> None:
@@ -513,21 +516,20 @@ class Bundle(Loader):
         tsutsumu: 'ModuleType',
         tsutsumu_bundle: 'ModuleType',
     ) -> None:
-        hr = b'# ' + b'=' * 78 + b'\n'
         with open(self._script, mode='rb') as file:
             content = file.read()
-        index = content.find(hr)
-        index = content.find(hr, index + len(hr))
-        init_start = content.rfind(b'__version__', 0, index)
-        init_length = index - 1 - init_start
-        bundle_start = index + len(hr) + 1
-        bundle_length = content.find(hr, bundle_start) - 1 - bundle_start
 
+        section1, section2, section3 = Toolbox.find_section_offsets(content)
+
+        module_offset = section1 + len(Toolbox.HEAVY_RULE)
+        module_length = content.find(b'\n', module_offset) + 1 - module_offset
         assert tsutsumu.__file__ is not None
-        self._manifest[tsutsumu.__file__] = ('v', init_start, init_length)
+        self._manifest[tsutsumu.__file__] = ('v', module_offset, module_length)
 
+        module_offset = section2 + len(Toolbox.HEAVY_RULE)
+        module_length = section3 - 1 - module_offset
         assert tsutsumu_bundle.__file__ is not None
-        self._manifest[tsutsumu_bundle.__file__] = ('v', bundle_start, bundle_length)
+        self._manifest[tsutsumu_bundle.__file__] = ('v', module_offset, module_length)
 
     def uninstall(self) -> None:
         sys.meta_path.remove(self)
