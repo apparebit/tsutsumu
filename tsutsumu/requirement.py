@@ -10,11 +10,11 @@ _DASHING = re.compile(r'[-_.]+')
 _REQUIREMENT_PARTS: re.Pattern[str] = re.compile(
     r"""
         ^
-               (?P<package>  [^[(;]+       )
-        (?: \[ (?P<extras>   [^]]+         ) \] [ ]* )?
-        (?: \( (?P<version1> [^)]*         ) \) [ ]*
-        |      (?P<version2> [<!=>~][^ ;]* )    [ ]* )?
-        (?:  ; (?P<marker>   .*            )         )?
+               (?P<package>  [^[(;\s]+    )    [ ]*
+        (?: \[ (?P<extras>   [^]]+        ) \] [ ]* )?
+        (?: \( (?P<version1> [^)]*        ) \) [ ]* )?
+        (?:    (?P<version2> [<!=>~][^;]* )    [ ]* )?
+        (?:  ; (?P<marker>   .*           )         )?
         $
     """,
     re.VERBOSE)
@@ -104,7 +104,7 @@ class _TypTok(Enum):
     ELIDED = auto()
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _Token:
     ELIDED_VALUE: 'ClassVar[_Token]'
 
@@ -128,6 +128,22 @@ def _tokenize(marker: str) -> Iterator[_Token]:
 
 
 class _Simplifier:
+    """
+    Simplifier of marker tokens. This class takes a sequence of marker tokens
+    and iteratively reduces semantically well-formed token groups until only one
+    token remains. This process is purposefully inaccurate in that it seeks to
+    extract an `EXTRA` token only. All other expressions reduce to the `ELIDED`
+    token. Both tokens are synthetic tokens without corresponding surface
+    syntax. By extracting a requirement's extra constraint this way, this class
+    can support most of the expressivity of markers, while also ensuring
+    correctness by design. The `Marker` class in
+    [packaging](https://github.com/pypa/packaging/tree/main) fully parses and
+    evaluates markers. But that also makes the result specific to the current
+    Python runtime and its host. Instead `Simplifier` serves as an accurate
+    cross-platform oracle for extras, which are critical for completely
+    resolving package dependencies.
+    """
+
     def __init__(self) -> None:
         self._token_stack: list[list[_Token]] = []
 
