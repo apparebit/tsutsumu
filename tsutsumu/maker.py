@@ -19,7 +19,7 @@ if TYPE_CHECKING:
             ...
 
 from tsutsumu import __version__
-
+from tsutsumu.bundle import Toolbox
 
 # --------------------------------------------------------------------------------------
 # File names and extensions acceptable for bundling
@@ -88,9 +88,6 @@ if __name__ == "__main__":
     # Run equivalent of "python -m {main}"
     runpy.run_module("{main}", run_name="__main__", alter_sys=True)
 """
-
-_SEPARATOR_HEAVY = b'# ' + b'=' * 78 + b'\n\n'
-_SEPARATOR = b'# ' + b'-' * 78 + b'\n'
 
 # --------------------------------------------------------------------------------------
 
@@ -262,9 +259,9 @@ class BundleMaker:
             return
 
         prefix = b'"' + key.encode('utf8') + b'":'
-        offset = len(_SEPARATOR) + len(prefix) + 1
+        offset = len(Toolbox.PLAIN_RULE) + len(prefix) + 1
 
-        yield _SEPARATOR
+        yield Toolbox.PLAIN_RULE
 
         if line_count == 1:
             if kind is FileKind.TEXT:
@@ -301,7 +298,7 @@ class BundleMaker:
     # ----------------------------------------------------------------------------------
 
     def emit_meta_data(self) -> 'Iterator[bytes]':
-        yield _SEPARATOR_HEAVY
+        yield Toolbox.HEAVY_RULE
         yield from self.emit_version()
         yield _EMPTY_LINE
         yield from self.emit_manifest()
@@ -331,10 +328,14 @@ class BundleMaker:
         main: str,
     ) -> 'Iterator[bytes]':
         yield _EMPTY_LINE
-        yield _SEPARATOR_HEAVY
-        yield from self.emit_tsutsumu_bundle()
+        yield Toolbox.HEAVY_RULE
+        try:
+            yield from self.emit_tsutsumu_bundle()
+        except Exception as x:
+            import traceback
+            traceback.print_exception(x)
 
-        yield _SEPARATOR_HEAVY
+        yield Toolbox.HEAVY_RULE
         repackage = 'bundle.repackage()\n    ' if self._repackage else ''
         repackage += "del sys.modules['__main__']"
 
