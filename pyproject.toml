@@ -45,7 +45,8 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/apparebit/tsutsumu"
+homepage = "https://github.com/apparebit/tsutsumu"
+repository = "https://github.com/apparebit/tsutsumu"
 
 [project.scripts]
 tsutsumu = "tsutsumu.__main__:main"
