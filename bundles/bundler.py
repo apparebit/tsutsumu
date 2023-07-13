@@ -165,12 +165,17 @@ if __name__ == '__main__':
             print()
 """,
 # ------------------------------------------------------------------------------
-"tsutsumu/dist_info.py":
+"tsutsumu/distribution/__init__.py":
+b"""from .requirement import parse_requirement
+from .distinfo import collect_dependencies, DistInfo
+""",
+# ------------------------------------------------------------------------------
+"tsutsumu/distribution/distinfo.py":
 b"""\x22\x22\x22Support for package metadata in form of .dist-info files.\x22\x22\x22
 
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, KW_ONLY
-import datetime
 import importlib
 import importlib.metadata as md
 import itertools
@@ -178,25 +183,61 @@ from pathlib import Path
 import tomllib
 from typing import cast, Literal, overload, TypeVar
 
-from . import requirement
+from .requirement import parse_requirement
+from .util import canonicalize, today_as_version
 
 
-_T = TypeVar('_T')
+__all__ = ('collect_dependencies', 'DistInfo')
 
-def today_as_version() -> str:
-    return '.'.join(str(part) for part in datetime.date.today().isocalendar())
 
+def collect_dependencies(pkgname: str, *pkgextras: str) -> 'dict[str, DistInfo]':
+    \x22\x22\x22
+    Determine the package dependencies of the given package, the dependencies of
+    those packages, and so on. This function determines the transitive closure
+    of package dependencies through a breadth-first search of the dependency
+    graph. This function does expect
+    \x22\x22\x22
+
+    pyproject_path = Path.cwd() / 'pyproject.toml' # type: ignore[misc]
+    if pyproject_path.exists():
+        distribution = DistInfo.from_pyproject(pyproject_path)
+    else:
+        distribution = DistInfo.from_installation(pkgname,pkgextras)
+
+    # Breadth-first search requires a queue
+    pending: deque[tuple[str, tuple[str, ...], str]] = (
+        deque((pkgname, pkgextras, req) for req in distribution.required_packages))
+    distributions = {pkgname: distribution}
+
+    while len(pending) > 0:
+        # Resolve the requirement to a distribution
+        pkgname, pkgextras, requirement = pending.pop()
+        dependency, dep_extras, _, only_for_extra = parse_requirement(requirement)
+        if only_for_extra is not None and only_for_extra not in pkgextras:
+            continue # since requirement is for unused package extra
+        if dependency in distributions:
+            continue
+        dist = DistInfo.from_installation(dependency, dep_extras)
+        distributions[dependency] = dist
+        pending.extend(
+            (dist.name, dist.extras, req) for req in dist.required_packages)
+
+    return distributions
+
+
+T = TypeVar('T')
 
 @dataclass(frozen=True, slots=True)
 class DistInfo:
     name: str
-    version: None | str = None
+    extras: tuple[str, ...] = ()
     _: KW_ONLY
+    version: None | str = None
     effective_version: str = field(init=False)
     summary: None | str = None
     homepage: None | str = None
     required_python: None | str = None
-    required_packages: None | tuple[str, ...] = None
+    required_packages: tuple[str, ...] = ()
     provenance: None | str = None
 
     @classmethod
@@ -207,12 +248,12 @@ class DistInfo:
             raise ValueError(f'\x22{path}\x22 lacks \x22project\x22 section')
 
         @overload
-        def property(key: str, typ: type[_T], is_optional: Literal[False]) -> _T:
+        def property(key: str, typ: type[T], is_optional: Literal[False]) -> T:
             ...
         @overload
-        def property(key: str, typ: type[_T], is_optional: Literal[True]) -> None | _T:
+        def property(key: str, typ: type[T], is_optional: Literal[True]) -> None | T:
             ...
-        def property(key: str, typ: type[_T], is_optional: bool) -> None | _T:
+        def property(key: str, typ: type[T], is_optional: bool) -> None | T:
             value = project_metadata.get(key)
             if value is None and is_optional:
                 return value
@@ -223,12 +264,12 @@ class DistInfo:
             else:
                 raise ValueError(f'\x22{path}\x22 has non-{typ.__name__} \x22{key}\x22 entry')
 
-        name = requirement.canonicalize(property('name', str, False))
+        name = canonicalize(property('name', str, False))
         version = property('version', str, True)
         summary = property('description', str, True)
         required_python = property('requires-python', str, True)
 
-        required_packages: None | tuple[str, ...] = None
+        required_packages: tuple[str, ...] = ()
         raw_requirements = property('dependencies', list, True)
         if raw_requirements:
             if any(not isinstance(p, str) for p in raw_requirements):
@@ -259,6 +300,7 @@ class DistInfo:
 
         return cls(
             name,
+            (),
             version=version,
             summary=summary,
             homepage=homepage,
@@ -268,31 +310,38 @@ class DistInfo:
         )
 
     @classmethod
-    def from_installation(cls, name: str, version: None | str = None) -> 'DistInfo':
-        name = requirement.canonicalize(name)
+    def from_installation(
+        cls,
+        name: str,
+        extras: Sequence[str] = (),
+        *,
+        version: None | str = None,
+    ) -> 'DistInfo':
+        name = canonicalize(name)
 
         if version is None:
             try:
                 distribution = md.distribution(name)
             except ModuleNotFoundError:
-                return cls(name)
+                return cls(name, tuple(extras))
 
         version = distribution.version
         summary = distribution.metadata['Summary']
         homepage = distribution.metadata['Home-page']
         required_python = distribution.metadata['Requires-Python']
 
-        required_packages = None
+        required_packages: tuple[str, ...] = ()
         raw_requirements = distribution.requires
         if raw_requirements is not None:
             required_packages = tuple(raw_requirements)
 
         provenance = None
         if hasattr(distribution, '_path'):
-            provenance = str(cast(Path, getattr(distribution, '_path')))
+            provenance = str(cast(Path, getattr(distribution, '_path')).absolute())
 
         return cls(
             name,
+            tuple(extras),
             version=version,
             summary=summary,
             homepage=homepage,
@@ -331,7 +380,7 @@ class DistInfo:
             lines.append('Home-page: ' + self.homepage)
         if self.required_python:
             lines.append('Requires-Python: ' + self.required_python)
-        for requirement in self.required_packages or ():
+        for requirement in self.required_packages:
             lines.append('Requires-Dist: ' + requirement)
 
         return metadata_path, '\\n'.join(lines) + '\\n'
@@ -342,6 +391,328 @@ class DistInfo:
         all_files = itertools.chain((prefix + 'METADATA', record_path), files)
         content = ',,\\n'.join(f'\x22{f}\x22' if ',' in f else f for f in all_files) + ',,\\n'
         return record_path, content
+""",
+# ------------------------------------------------------------------------------
+"tsutsumu/distribution/marker.py":
+b"""from collections.abc import Iterator
+from dataclasses import dataclass
+from enum import auto, Enum
+import re
+from typing import Callable, cast, NoReturn
+
+from .util import canonicalize
+
+
+__all__ = ('extract_extra',)
+
+
+MARKER_SYNTAX = re.compile(
+    r\x22\x22\x22
+        (?P<WS> \\s+)
+        | (?P<OPEN> [(])
+        | (?P<CLOSE> [)])
+        | (?P<COMP> <=? | != | ===? | >=? | ~= | not\\s+in | in)
+        | (?P<BOOL> and | or)
+        | (?P<LIT> '[^']*' | \x22[^\x22]*\x22)
+        | (?P<VAR>  [a-z] (?: [a-z_]* [a-z])?)
+    \x22\x22\x22,
+    re.VERBOSE)
+
+
+VARIABLE_NAMES = set([
+    'python_version', 'python_full_version', 'os_name', 'sys_platform',
+    'platform_release', 'platform_system', 'platform_version', 'platform_machine',
+    'platform_python_implementation','implementation_name', 'implementation_version',
+    'extra',
+])
+
+
+class TypTok(Enum):
+    \x22\x22\x22A class identifying the type of a token.\x22\x22\x22
+
+    WS = auto()         # whitespace, dropped early
+
+    LIT = auto()        # string literals, incl. their quotes
+    VAR = auto()        # variables incl. extra
+    COMP = auto()       # comparison operators, which combine LIT and VAR
+    BOOL = auto()       # boolean and/or, which combine COMP-triples
+    OPEN = auto()       # open parenthesis
+    CLOSE = auto()      # close parenthesis
+
+    EXTRA = auto()      # an \x22extra == 'tag'\x22 expression
+    NOT_EXTRA = auto()  # any combination of well-formed expressions without extra
+
+
+@dataclass(frozen=True, slots=True)
+class Token:
+    tag: TypTok
+    content: str
+
+
+# The canonical not-extra token
+ELIDED = Token(TypTok.NOT_EXTRA, '')
+
+
+# ======================================================================================
+
+def invalid_syntax(*tokens: str | Token) -> NoReturn:
+    fragment = ' '.join(t.content if isinstance(t, Token) else t for t in tokens)
+    raise ValueError(f'invalid syntax in marker \x22{fragment}\x22')
+
+def tokenize(marker: str) -> Iterator[Token]:
+    marker = marker.lower()
+    cursor = 0
+    while (t := MARKER_SYNTAX.match(marker, cursor)):
+        cursor = t.end()
+        tag_name = cast(str, t.lastgroup)
+        if tag_name == 'WS':
+            continue
+        tag_content = t.group()
+        if tag_name == 'VAR' and tag_content not in VARIABLE_NAMES:
+            raise ValueError(f'marker contains unknown variable \x22{tag_content}\x22')
+        yield Token(TypTok[tag_name], tag_content)
+    if cursor < len(marker):
+        invalid_syntax(marker[cursor:])
+
+def do_apply_comparison(var: Token, op: Token, lit: Token) -> Token:
+    if lit.tag is not TypTok.LIT:
+        invalid_syntax(var, op, lit)
+    if var.content == 'extra':
+        if op.content != '==' or len(lit.content) < 3:
+            invalid_syntax(var, op, lit)
+        return Token(TypTok.EXTRA, canonicalize(lit.content[1:-1]))
+    return ELIDED
+
+def apply_comparison(left: Token, op: Token, right: Token) -> Token:
+    if op.tag is TypTok.COMP:
+        if left.tag is TypTok.VAR:
+            return do_apply_comparison(left, op, right)
+        elif right.tag is TypTok.VAR:
+            return do_apply_comparison(right, op, left)
+    invalid_syntax(left, op, right)
+
+def apply_junction(left: Token, op: Token, right: Token) -> Token:
+    if op.tag is not TypTok.BOOL:
+        invalid_syntax(left, op, right)
+    if left.tag is TypTok.EXTRA:
+        if right.tag is TypTok.EXTRA and left.content == right.content:
+            return left
+        if right.tag is TypTok.NOT_EXTRA and op.content == 'and':
+            return left
+    elif right.tag is TypTok.EXTRA:
+        if left.tag is TypTok.NOT_EXTRA and op.content == 'and':
+            return right
+    elif left.tag is TypTok.NOT_EXTRA and right.tag is TypTok.NOT_EXTRA:
+        return ELIDED
+    invalid_syntax(left, op, right)
+
+def distill_extra(tokens: list[Token]) -> Token:
+    cursor = 0
+    length = len(tokens)
+    stack: list[Token] = []
+
+    def shift_onto_stack(token: Token) -> None:
+        stack.append(token)
+
+    def reduce_stack_with(reducer: Callable[[Token, Token, Token], Token]) -> None:
+        right = stack.pop()
+        op = stack.pop()
+        left = stack.pop()
+        stack.append(reducer(left, op, right))
+
+    def is_junction_on_stack(content: str, offset: int = 0) -> bool:
+        if len(stack) < offset + 3:
+            return False
+        token = stack[-offset-2]
+        return token.tag is TypTok.BOOL and token.content == content
+
+    def peek_token() -> Token:
+        return tokens[cursor]
+
+    def has_tokens(count: int = 1) -> bool:
+        return cursor + count - 1 < length
+
+    def next_token() -> Token:
+        nonlocal cursor
+        token = tokens[cursor]
+        cursor += 1
+        return token
+
+    def find_close_token() -> int:
+        nesting = 0
+        for index in range(cursor + 1, length):
+            token = tokens[index]
+            if nesting == 0 and token.tag is TypTok.CLOSE:
+                return index
+            if token.tag is TypTok.OPEN:
+                nesting += 1
+            elif token.tag is TypTok.CLOSE:
+                if nesting == 0:
+                    invalid_syntax(*tokens[index:])
+                nesting -= 1
+        raise ValueError(f'opening parenthesis without closing one')
+
+    while True:
+        if has_tokens() and peek_token().tag is TypTok.OPEN:
+            close = find_close_token()
+            shift_onto_stack(distill_extra(tokens[1 : close]))
+            tokens[0 : close + 1] = []
+        elif has_tokens(3):
+            result = apply_comparison(next_token(), next_token(), next_token())
+            shift_onto_stack(result)
+        if is_junction_on_stack('and'):
+            reduce_stack_with(apply_junction)
+        if not has_tokens():
+            break
+        shift_onto_stack(next_token())
+
+    while len(stack) > 1:
+        if not is_junction_on_stack('or'):
+            invalid_syntax(*tokens)
+        reduce_stack_with(apply_junction)
+
+    return stack[0]
+
+def extract_extra(marker: str) -> None | str:
+    try:
+        tokens = [*tokenize(marker)]
+        token = distill_extra(tokens)
+    except ValueError:
+        raise ValueError(f'malformed marker \x22{marker}\x22')
+    else:
+        if token.tag is TypTok.NOT_EXTRA:
+            return None
+        if token.tag is TypTok.EXTRA:
+            return token.content
+        raise ValueError(f'malformed marker \x22{marker}\x22')
+""",
+# ------------------------------------------------------------------------------
+"tsutsumu/distribution/requirement.py":
+b"""import re
+from typing import cast
+
+from .marker import extract_extra
+from .util import canonicalize
+
+
+__all__ = ('parse_requirement',)
+
+
+REQUIREMENT_PARTS: re.Pattern[str] = re.compile(
+    r\x22\x22\x22
+        ^
+               (?P<package>  [^[(;\\s]+    )    [ ]*
+        (?: \\[ (?P<extras>   [^]]+        ) \\] [ ]* )?
+        (?: \\( (?P<version1> [^)]*        ) \\) [ ]* )?
+        (?:    (?P<version2> [<!=>~][^;]* )    [ ]* )?
+        (?:  ; (?P<marker>   .*           )         )?
+        $
+    \x22\x22\x22,
+    re.VERBOSE)
+
+def parse_requirement(
+    requirement: str
+) -> tuple[str, list[str], list[str], None | str]:
+    if (parts := REQUIREMENT_PARTS.match(requirement)) is None:
+        raise ValueError(f'requirement \x22{requirement} is malformed')
+
+    package = canonicalize(cast(str, parts.group('package')).strip())
+
+    extras = []
+    if (extras_text := cast(str, parts['extras'])):
+        extras = [canonicalize(extra.strip()) for extra in extras_text.split(',')]
+
+    versions = []
+    if (version_text := parts['version1'] or parts['version2']): # type: ignore[misc]
+        versions = [
+            v.strip().replace(' ', '') for v in cast(str, version_text).split(',')]
+
+    marker = None
+    marker_text = cast(str, parts['marker'])
+    if marker_text is not None:
+        marker = extract_extra(marker_text.strip())
+
+    return package, extras, versions, marker
+
+""",
+# ------------------------------------------------------------------------------
+"tsutsumu/distribution/storage.py":
+b"""from collections.abc import Iterator
+from enum import Enum
+from pathlib import Path
+from typing import NamedTuple
+
+from .distinfo import collect_dependencies, DistInfo
+
+
+class FileType(Enum):
+    BINARY = 'b'
+    METADATA = 'm'
+    TEXT = 't'
+    VALUE = 'v'
+
+
+class FileRef(NamedTuple):
+    tag: FileType
+    path: Path
+    key: str
+
+
+def python_file_fraction(path: str | Path) -> float:
+    path = Path(path)
+    if not path.exists() or not path.is_dir():
+        return 0
+    all_files = python_files = 0
+    for item in path.iterdir():
+        if not item.is_file():
+            continue
+        all_files += 1
+        python_files += (item.suffix == '.py')
+    return python_files / all_files
+
+
+def locate_module_root(distinfo: DistInfo) -> Path:
+    if distinfo.provenance is None:
+        raise ValueError(
+            f'lack of provenance for \x22{distinfo.name}\x22 prevents enumeration of files')
+
+    distpath = Path(distinfo.provenance)
+    if distpath.suffix == '.dist-info' and distpath.is_dir():
+        modpath = distpath.parent
+        if python_file_fraction(modpath) > 0.6:
+            return modpath
+
+    if distpath.name == 'pyproject.toml' and distpath.is_file():
+        modpath = distpath.parent / distinfo.name
+        if python_file_fraction(modpath) > 0.6:
+            return modpath
+        modpath = distpath.parent / 'src', distinfo.name
+        if python_file_fraction(modpath) > 0.6:
+            return modpath
+
+    raise ValueError(f'unable to determine module root for \x22{distinfo.name}\x22')
+
+
+dependencies = collect_dependencies('tsutsumu', 'dev')
+for name, distinfo in dependencies.items():
+    print(name, locate_module_root(distinfo))
+
+""",
+# ------------------------------------------------------------------------------
+"tsutsumu/distribution/util.py":
+b"""import datetime
+import re
+
+__all__ = ('canonicalize', 'today_as_version')
+
+_DASHING = re.compile(r'[-_.]+')
+
+def canonicalize(name: str, separator: str = '-') -> str:
+    \x22\x22\x22Convert a package or tag name to its canonical form.\x22\x22\x22
+    return _DASHING.sub(separator, name).lower()
+
+def today_as_version() -> str:
+    return '.'.join(str(part) for part in datetime.date.today().isocalendar())
 """,
 # ------------------------------------------------------------------------------
 "tsutsumu/maker.py":
@@ -730,316 +1101,6 @@ class BundleMaker:
             for line in lines:
                 writable.write(line)
 """,
-# ------------------------------------------------------------------------------
-"tsutsumu/requirement.py":
-b"""from collections.abc import Iterator
-from dataclasses import dataclass
-from enum import auto, Enum
-import re
-from typing import cast, ClassVar, overload
-
-
-_DASHING = re.compile(r'[-_.]+')
-
-_REQUIREMENT_PARTS: re.Pattern[str] = re.compile(
-    r\x22\x22\x22
-        ^
-               (?P<package>  [^[(;\\s]+    )    [ ]*
-        (?: \\[ (?P<extras>   [^]]+        ) \\] [ ]* )?
-        (?: \\( (?P<version1> [^)]*        ) \\) [ ]* )?
-        (?:    (?P<version2> [<!=>~][^;]* )    [ ]* )?
-        (?:  ; (?P<marker>   .*           )         )?
-        $
-    \x22\x22\x22,
-    re.VERBOSE)
-
-_MARKER_TOKEN: re.Pattern[str] = re.compile(
-    r\x22\x22\x22
-        (?P<WS> \\s+)
-        | (?P<OPEN> [(])
-        | (?P<CLOSE> [)])
-        | (?P<COMP> <=? | != | ===? | >=? | ~= | not\\s+in | in)
-        | (?P<BOOL> and | or)
-        | (?P<LIT> '[^']*' | \x22[^\x22]*\x22)
-        | (?P<VAR>  python_ (?: full_)? version | os_name | sys_platform
-            | platform_ (?: release | system | version| machine | python_implementation)
-            | implementation[._] (?: name | version)
-            | extra )
-    \x22\x22\x22,
-    re.VERBOSE)
-
-
-# ======================================================================================
-
-
-def canonicalize(name: str, separator: str = '-') -> str:
-    \x22\x22\x22Convert the package or extra name to its canonical form.\x22\x22\x22
-    return _DASHING.sub(separator, name).lower()
-
-
-def parse_requirement(
-    requirement: str
-) -> tuple[str, None | list[str], None| list[str], None | str]:
-    \x22\x22\x22
-    Parse the package requirement. Unlike the equivalent functionality in the
-    `packaging` package, this function extracts all information needed for
-    making sense of packages and their extras but without assuming a specific
-    Python runtime and host computer. This function returns the name of the
-    required package, the optional list of extras for the required package, the
-    optional list of version constraints for the required package, and the
-    optional extra for the current package. If the latter is present, the
-    package that has this requirement scopes the requirement to that extra.
-    All returned package name and extra names are in canonical form.
-    \x22\x22\x22
-
-    if (parts := _REQUIREMENT_PARTS.match(requirement)) is None:
-        raise ValueError(f'requirement \x22{requirement} is malformed')
-
-    package = canonicalize(cast(str, parts.group('package')).strip())
-
-    extras = None
-    if (extras_text := cast(str, parts['extras'])):
-        extras = [canonicalize(extra.strip()) for extra in extras_text.split(',')]
-
-    versions = None
-    if (version_text := parts['version1'] or parts['version2']): # type: ignore[misc]
-        versions = [v.strip() for v in cast(str, version_text).split(',')]
-
-    marker = None
-    marker_text = cast(str, parts['marker'])
-    if marker_text is not None:
-        marker_tokens = [t for t in _tokenize(marker_text) if t.type is not _TypTok.WS]
-        raw_marker = _Simplifier().extract_extra(marker_tokens)
-        marker = None if raw_marker is None else canonicalize(raw_marker)
-
-    return package, extras, versions, marker
-
-
-# ======================================================================================
-
-
-class _TypTok(Enum):
-    \x22\x22\x22
-    Not a type token but rather a token type or tag. `WS` tokens probably are
-    dropped early on. `EXTRA` and `ELIDED` tokens probably shouldn't be
-    generated during lexing; they help analyze markers without fully parsing
-    them.
-    \x22\x22\x22
-    WS = auto()
-
-    OPEN = auto()
-    CLOSE = auto()
-    COMP = auto()
-    BOOL = auto()
-    LIT = auto()
-    VAR = auto()
-
-    EXTRA = auto()
-    ELIDED = auto()
-
-
-@dataclass(frozen=True, slots=True)
-class _Token:
-    ELIDED_VALUE: 'ClassVar[_Token]'
-
-    type: _TypTok
-    content: str
-
-    @classmethod
-    def extra(cls, literal: str) -> '_Token':
-        return cls(_TypTok.EXTRA, canonicalize(literal[1:-1]))
-
-_Token.ELIDED_VALUE = _Token(_TypTok.ELIDED, '')
-
-
-def _tokenize(marker: str) -> Iterator[_Token]:
-    cursor = 0
-    while (t := _MARKER_TOKEN.match(marker, cursor)) is not None:
-        cursor = t.end()
-        yield _Token(_TypTok[cast(str, t.lastgroup)], t.group())
-    if cursor < len(marker):
-        raise ValueError(f'unrecognized \x22{marker[cursor:]}\x22 in marker \x22{marker}\x22')
-
-
-class _Simplifier:
-    \x22\x22\x22
-    Simplifier of marker tokens. This class takes a sequence of marker tokens
-    and iteratively reduces semantically well-formed token groups until only one
-    token remains. This process is purposefully inaccurate in that it seeks to
-    extract an `EXTRA` token only. All other expressions reduce to the `ELIDED`
-    token. Both tokens are synthetic tokens without corresponding surface
-    syntax. By extracting a requirement's extra constraint this way, this class
-    can support most of the expressivity of markers, while also ensuring
-    correctness by design. The `Marker` class in
-    [packaging](https://github.com/pypa/packaging/tree/main) fully parses and
-    evaluates markers. But that also makes the result specific to the current
-    Python runtime and its host. Instead `Simplifier` serves as an accurate
-    cross-platform oracle for extras, which are critical for completely
-    resolving package dependencies.
-    \x22\x22\x22
-
-    def __init__(self) -> None:
-        self._token_stack: list[list[_Token]] = []
-
-    # ----------------------------------------------------------------------------------
-
-    def start(self, tokens: list[_Token]) -> None:
-        self._token_stack.append(tokens)
-
-    def done(self) -> _Token:
-        assert len(self._token_stack) > 0
-        assert len(self._token_stack[-1]) == 1
-        return self._token_stack.pop()[0]
-
-    @overload
-    def __getitem__(self, index: int) -> _Token:
-        ...
-    @overload
-    def __getitem__(self, index: slice) -> list[_Token]:
-        ...
-    def __getitem__(self, index: int | slice) -> _Token | list[_Token]:
-        return self._token_stack[-1][index]
-
-    def __len__(self) -> int:
-        return len(self._token_stack[-1])
-
-    def type(self, index: int) -> _TypTok:
-        return self[index].type
-
-    def content(self, index: int) -> str:
-        return self[index].content
-
-    # ----------------------------------------------------------------------------------
-
-    def find(self, type: _TypTok) -> int:
-        for index, token in enumerate(self._token_stack[-1]):
-            if token.type == type:
-                return index
-        return -1
-
-    def match(self, *patterns: None | str | _TypTok | _Token, start: int = 0) -> bool:
-        for index, pattern in enumerate(patterns):
-            if pattern is None:
-                continue
-            if isinstance(pattern, _TypTok):
-                if self[start + index].type == pattern:
-                    continue
-                return False
-            if isinstance(pattern, str):
-                if self[start + index].content == pattern:
-                    continue
-                return False
-            assert isinstance(pattern, _Token)
-            if self[start + index] == pattern:
-                continue
-            return False
-        return True
-
-    # ----------------------------------------------------------------------------------
-
-    def reduce(self, start: int, stop: int, value: _Token) -> None:
-        self._token_stack[-1][start: stop] = [value]
-
-    def apply(self, tokens: list[_Token]) -> _Token:
-        self.start(tokens)
-        tp = _TypTok
-
-        def elide3(start: int) -> None:
-            self.reduce(start, start + 3, _Token.ELIDED_VALUE)
-
-        def handle_comp(var: int, lit: int) -> None:
-            assert self.type(lit) is tp.LIT
-            if self.content(var) != 'extra':
-                elide3(min(var, lit))
-                return
-            assert self.content(1) == '=='
-            start = min(var, lit)
-            self.reduce(start, start + 3, _Token.extra(self[lit].content))
-
-        while len(self) > 1:
-            # Recurse on parentheses
-            if self.match(tp.OPEN):
-                close = self.find(tp.CLOSE)
-                assert close >= 0
-                value = self.apply(self[1 : close])
-                self.reduce(0, close + 1, value)
-                continue
-
-            # Handle comparisons, which include extra clauses
-            if self.match(None, tp.COMP):
-                if self.match(tp.VAR):
-                    handle_comp(0, 2)
-                    continue
-                if self.match(None, None, tp.VAR):
-                    handle_comp(2, 0)
-                    continue
-                if self.match(tp.LIT, None, tp.LIT):
-                    elide3(0)
-                    continue
-                assert False
-
-            # Process conjunctions before disjunctions
-            assert self.match(None, tp.BOOL)
-            if self.match(None, 'and'):
-                if self.match(tp.ELIDED, 'and', tp.ELIDED):
-                    elide3(0)
-                elif self.match(tp.EXTRA, 'and', tp.ELIDED):
-                    self.reduce(0, 3, self[0])
-                elif self.match(tp.ELIDED, 'and', tp.EXTRA):
-                    self.reduce(0, 3, self[2])
-                elif self.match(tp.EXTRA, 'and', tp.EXTRA):
-                    assert self.content(0) == self.content(2)
-                    self.reduce(0, 3, self[0])
-                continue
-
-            # Reduce disjunction only if 2nd argument also is a single token
-            assert self.content(1) == 'or'
-            if len(self) == 3 or self[3].type == tp.BOOL and self[3].content == 'or':
-                if self.match(tp.ELIDED, None, tp.ELIDED):
-                    elide3(0)
-                elif self.match(tp.EXTRA, None, tp.EXTRA):
-                    # In theory, we could combine unequal extras into set.
-                    # In practice, the entire marker syntax is far too expressive.
-                    assert self.content(0) == self.content(2)
-                    self.reduce(0, 3, self[0])
-                else:
-                    assert False
-                continue
-
-            # Recurse on span to the next disjunction
-            paren_level = 0
-            cursor = 4
-
-            while cursor < len(self):
-                ct = self.type(cursor)
-                if ct is tp.OPEN:
-                    paren_level += 1
-                elif ct is tp.CLOSE:
-                    assert paren_level > 0
-                    paren_level -= 1
-                elif ct in (tp.COMP, tp.LIT, tp.VAR):
-                    pass
-                elif ct is tp.BOOL:
-                    if self.content(cursor) == 'or':
-                        break
-                else:
-                    assert False
-
-            assert paren_level == 0
-            self.reduce(2, cursor, self.apply(self[2:cursor]))
-
-        return self.done()
-
-    # ----------------------------------------------------------------------------------
-
-    def extract_extra(self, tokens: list[_Token]) -> None | str:
-        token = self.apply(tokens)
-        if token.type is _TypTok.ELIDED:
-            return None
-        if token.type is _TypTok.EXTRA:
-            return token.content
-        assert False
-""",
 }
 
 # ==============================================================================
@@ -1049,9 +1110,13 @@ __version__ = '0.2.0'
 __manifest__ = {
     "tsutsumu/__main__.py": ("t", 309, 4_319),
     "tsutsumu/debug.py": ("t", 4_732, 1_229),
-    "tsutsumu/dist_info.py": ("t", 6_069, 6_687),
-    "tsutsumu/maker.py": ("t", 12_860, 13_460),
-    "tsutsumu/requirement.py": ("t", 26_430, 11_235),
+    "tsutsumu/distribution/__init__.py": ("t", 6_081, 103),
+    "tsutsumu/distribution/distinfo.py": ("t", 6_304, 8_381),
+    "tsutsumu/distribution/marker.py": ("t", 14_803, 6_368),
+    "tsutsumu/distribution/requirement.py": ("t", 21_294, 1_402),
+    "tsutsumu/distribution/storage.py": ("t", 22_815, 1_684),
+    "tsutsumu/distribution/util.py": ("t", 24_615, 415),
+    "tsutsumu/maker.py": ("t", 25_134, 13_460),
 }
 
 # ==============================================================================
