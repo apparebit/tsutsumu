@@ -1,8 +1,8 @@
 """Support for package metadata in form of .dist-info files."""
 
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, KW_ONLY
-import datetime
 import importlib
 import importlib.metadata as md
 import itertools
@@ -10,25 +10,61 @@ from pathlib import Path
 import tomllib
 from typing import cast, Literal, overload, TypeVar
 
-from . import requirement
+from .requirement import parse_requirement
+from .util import canonicalize, today_as_version
 
 
-_T = TypeVar('_T')
+__all__ = ('collect_dependencies', 'DistInfo')
 
-def today_as_version() -> str:
-    return '.'.join(str(part) for part in datetime.date.today().isocalendar())
 
+def collect_dependencies(pkgname: str, *pkgextras: str) -> 'dict[str, DistInfo]':
+    """
+    Determine the package dependencies of the given package, the dependencies of
+    those packages, and so on. This function determines the transitive closure
+    of package dependencies through a breadth-first search of the dependency
+    graph. This function does expect
+    """
+
+    pyproject_path = Path.cwd() / 'pyproject.toml' # type: ignore[misc]
+    if pyproject_path.exists():
+        distribution = DistInfo.from_pyproject(pyproject_path)
+    else:
+        distribution = DistInfo.from_installation(pkgname,pkgextras)
+
+    # Breadth-first search requires a queue
+    pending: deque[tuple[str, tuple[str, ...], str]] = (
+        deque((pkgname, pkgextras, req) for req in distribution.required_packages))
+    distributions = {pkgname: distribution}
+
+    while len(pending) > 0:
+        # Resolve the requirement to a distribution
+        pkgname, pkgextras, requirement = pending.pop()
+        dependency, dep_extras, _, only_for_extra = parse_requirement(requirement)
+        if only_for_extra is not None and only_for_extra not in pkgextras:
+            continue # since requirement is for unused package extra
+        if dependency in distributions:
+            continue
+        dist = DistInfo.from_installation(dependency, dep_extras)
+        distributions[dependency] = dist
+        pending.extend(
+            (dist.name, dist.extras, req) for req in dist.required_packages)
+
+    return distributions
+
+
+T = TypeVar('T')
 
 @dataclass(frozen=True, slots=True)
 class DistInfo:
     name: str
-    version: None | str = None
+    extras: tuple[str, ...] = ()
     _: KW_ONLY
+    version: None | str = None
     effective_version: str = field(init=False)
     summary: None | str = None
     homepage: None | str = None
     required_python: None | str = None
-    required_packages: None | tuple[str, ...] = None
+    required_packages: tuple[str, ...] = ()
     provenance: None | str = None
 
     @classmethod
@@ -39,12 +75,12 @@ class DistInfo:
             raise ValueError(f'"{path}" lacks "project" section')
 
         @overload
-        def property(key: str, typ: type[_T], is_optional: Literal[False]) -> _T:
+        def property(key: str, typ: type[T], is_optional: Literal[False]) -> T:
             ...
         @overload
-        def property(key: str, typ: type[_T], is_optional: Literal[True]) -> None | _T:
+        def property(key: str, typ: type[T], is_optional: Literal[True]) -> None | T:
             ...
-        def property(key: str, typ: type[_T], is_optional: bool) -> None | _T:
+        def property(key: str, typ: type[T], is_optional: bool) -> None | T:
             value = project_metadata.get(key)
             if value is None and is_optional:
                 return value
@@ -55,12 +91,12 @@ class DistInfo:
             else:
                 raise ValueError(f'"{path}" has non-{typ.__name__} "{key}" entry')
 
-        name = requirement.canonicalize(property('name', str, False))
+        name = canonicalize(property('name', str, False))
         version = property('version', str, True)
         summary = property('description', str, True)
         required_python = property('requires-python', str, True)
 
-        required_packages: None | tuple[str, ...] = None
+        required_packages: tuple[str, ...] = ()
         raw_requirements = property('dependencies', list, True)
         if raw_requirements:
             if any(not isinstance(p, str) for p in raw_requirements):
@@ -91,6 +127,7 @@ class DistInfo:
 
         return cls(
             name,
+            (),
             version=version,
             summary=summary,
             homepage=homepage,
@@ -100,31 +137,38 @@ class DistInfo:
         )
 
     @classmethod
-    def from_installation(cls, name: str, version: None | str = None) -> 'DistInfo':
-        name = requirement.canonicalize(name)
+    def from_installation(
+        cls,
+        name: str,
+        extras: Sequence[str] = (),
+        *,
+        version: None | str = None,
+    ) -> 'DistInfo':
+        name = canonicalize(name)
 
         if version is None:
             try:
                 distribution = md.distribution(name)
             except ModuleNotFoundError:
-                return cls(name)
+                return cls(name, tuple(extras))
 
         version = distribution.version
         summary = distribution.metadata['Summary']
         homepage = distribution.metadata['Home-page']
         required_python = distribution.metadata['Requires-Python']
 
-        required_packages = None
+        required_packages: tuple[str, ...] = ()
         raw_requirements = distribution.requires
         if raw_requirements is not None:
             required_packages = tuple(raw_requirements)
 
         provenance = None
         if hasattr(distribution, '_path'):
-            provenance = str(cast(Path, getattr(distribution, '_path')))
+            provenance = str(cast(Path, getattr(distribution, '_path')).absolute())
 
         return cls(
             name,
+            tuple(extras),
             version=version,
             summary=summary,
             homepage=homepage,
@@ -163,7 +207,7 @@ class DistInfo:
             lines.append('Home-page: ' + self.homepage)
         if self.required_python:
             lines.append('Requires-Python: ' + self.required_python)
-        for requirement in self.required_packages or ():
+        for requirement in self.required_packages:
             lines.append('Requires-Dist: ' + requirement)
 
         return metadata_path, '\n'.join(lines) + '\n'
