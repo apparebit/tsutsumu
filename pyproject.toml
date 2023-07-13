@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "tsutsumu"
-description = "Python module bundles"
+description = "Simple, flexible module bundling for Python"
 readme = "README.md"
 requires-python = ">=3.7"
 license = {text = "Apache 2.0"}
