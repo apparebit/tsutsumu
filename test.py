@@ -62,19 +62,44 @@ def main() -> None:
 
     # ----------------------------------------------------------------------------------
 
-    console.info('Testing distribution metadata ingestion...')
-    from tsutsumu.requirement import parse_requirement
+    console.info('Testing extra extraction from requirements...')
+    from tsutsumu.distribution.requirement import parse_requirement
 
     for requirement, expected_result in (
-        ('spam', ('spam', None, None, None)),
-        ('spam [ can ,label]', ('spam', ['can', 'label'], None, None)),
-        ('spam >6.6.5, < 6.6.6', ('spam', None, ['>6.6.5', '< 6.6.6'], None)),
-        ('spam ; extra == "can"', ('spam', None, None, 'can')),
+        ('spam', ('spam', [], [], None)),
+        ('spam [ can ,label]', ('spam', ['can', 'label'], [], None)),
+        ('spam >6.6.5, < 6.6.6', ('spam', [], ['>6.6.5', '<6.6.6'], None)),
+        ('spam ; extra == "can"', ('spam', [], [], 'can')),
+        ('spam; "can"==  extra', ('spam', [], [], 'can')),
+        ('spam[bacon](==2.0)', ('spam', ['bacon'], ['==2.0'], None)),
+        ('spam; os_name != "bacon" and os_name != "ham" and extra == "tofu"',
+            ('spam', [], [], 'tofu')),
+        ('spam; extra == "bacon" or "bacon" == extra', ('spam', [], [], 'bacon')),
     ):
-        result = parse_requirement(requirement)
-        print(result)
-        assert parse_requirement(requirement) == expected_result
+        requirement_quadruple = parse_requirement(requirement)
+        console.detail(f'{requirement_quadruple}')
+        assert requirement_quadruple == expected_result
 
+    # ----------------------------------------------------------------------------------
+
+    console.info('Testing ingestion from pyproject.toml...')
+    from tsutsumu.distribution.distinfo import DistInfo
+
+    pyproject_path = Path('pyproject.toml').absolute()
+    distinfo = DistInfo.from_pyproject(pyproject_path)
+    for key, expected in (
+        ('name', 'tsutsumu'),
+        ('extras', ()),
+        ('version', tsutsumu.__version__),
+        ('summary', 'Simple, flexible module bundling for Python'),
+        ('homepage', 'https://github.com/apparebit/tsutsumu'),
+        ('required_python', '>=3.7'),
+        ('required_packages', ()),
+        ('provenance', str(pyproject_path)),
+    ):
+        actual = getattr(distinfo, key) # type: ignore[misc]
+        message = f'distinfo.{key} is {actual} instead of {expected}' #type:ignore[misc]
+        assert actual == expected, message  # type: ignore[misc]
     # ----------------------------------------------------------------------------------
 
     console.info('Rebuilding repository bundles...')
@@ -226,14 +251,14 @@ def main() -> None:
     # ----------------------------------------------------------------------------------
 
     console.info('Comparing repackaged Tsutsumu modules to originals...')
-    result = subprocess.run([
+    completion = subprocess.run([
             sys.executable,
             'test.py',
             'run-repackaged-module-test'
         ],
     )
 
-    if result.returncode != 0:
+    if completion.returncode != 0:
         console.error('Repackaged modules differ from originals!')
         sys.exit(1)
 
@@ -259,15 +284,17 @@ def repackaged_module_test() -> None:
         'exec',
         dont_inherit=True,
     )
-    mod_bundle_bindings = dict()
+    mod_bundle_bindings: dict[str, object] = dict()
     exec(mod_bundle_binary, mod_bundle_bindings)
     Toolbox = mod_bundle_bindings['Toolbox']
     Bundle = mod_bundle_bindings['Bundle']
 
     repackaged_path = cwd / 'tmp' / 'repackaged-bundler.py'
-    version, manifest = Toolbox.load_meta_data(repackaged_path)
-    bundle = Bundle.install(repackaged_path, version, manifest)
-    bundle.repackage()
+    version, manifest = (
+        Toolbox.load_meta_data(repackaged_path)) # type: ignore[attr-defined,misc]
+    bundle = (Bundle.install( # type: ignore[attr-defined,misc]
+        repackaged_path, version, manifest)) # type: ignore[misc]
+    bundle.repackage() # type: ignore[misc]
 
     # Compare repackaged modules to their originals.
     package_path = cwd / 'tsutsumu'
@@ -276,12 +303,12 @@ def repackaged_module_test() -> None:
     code = 0
     for module in ('__init__.py', 'bundle.py'):
         original = (package_path / module).read_bytes()
-        repackaged = bundle[str(bundled_package_path / module)]
-        if original == repackaged:
+        repackaged = bundle[str(bundled_package_path / module)] # type: ignore[misc]
+        if original == repackaged: # type: ignore[misc]
             print(f'Repackaged "tsutsumu/{module}" matched original')
         else:
             print(f'Repackaged "tsutsumu/{module}" did NOT match original:')
-            print(f'{repackaged!r}')
+            print(f'{repackaged!r}') # type: ignore[misc]
             code = 1
 
     sys.exit(code)
