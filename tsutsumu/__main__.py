@@ -20,32 +20,37 @@ def parser() -> ArgumentParser:
     parser = ArgumentParser('tsutsumu',
         description=dedent("""
             Combine Python modules and related resources into a single,
-            self-contained script. To determine which files to include in the
-            bundle, this tool traverses the given directories and their
-            subdirectories. Since module resolution is based on path names, this
-            tool skips directories and files that do not have valid Python
-            module names.
+            self-contained file.
 
-            By default, the generated script includes code for importing modules
-            from the bundle and for executing one of its modules, very much like
-            "python -m" does. If the bundled modules include exactly one
-            __main__ module, Tsutsumu automatically selects that module. If
-            there are no or several such modules or you want to execute another
-            module, please use the -m/--main option to specify the module name.
+            Tsutsumu automatically determines which files to include in a bundle
+            by tracing a main package's dependencies at the granularity of
+            packages and their extras. That means that either all of a package's
+            or extra's files are included in a bundle or none of them. While
+            that may end up bundling files that aren't really needed, it also is
+            more robust because it follows the same recipe as package building
+            and similar tools.
 
-            You can use the -b/--bundle-only option to omit the bundle runtime
-            and bootstrap code from the generated script. That way, you can
-            break your application into several bundles. Though you probably
-            want to include that code with your application's primary bundle.
-            The application can then use `Bundle.exec_install()` to load and
-            install such secondary bundles and `Bundle.uninstall()` to uninstall
-            them again.
+            Tsutsumu supports two different bundle formats. It defaults to its
+            own, textual bundle format, which is particularly suitable to use
+            cases, where trust is lacking and a bundle's source code should be
+            readily inspectable before execution or where the runtime
+            environment is resource-constrained. For use under less stringent
+            requirements, Tsutsumu also targets the `zipapp` format included in
+            Python's standard library, which is a bit more resource-intensive
+            but also produces smaller bundles. Please use `-f`/`--format` to
+            explicitly select the bundle's format.
 
-            Tsutsumu always generates the bundle script in binary format.
-            Re-encoding its output or even changing the line endings will likely
-            break the generated script! By default, the script is written to
-            standard out. Please use the -o/--output option to write to a file
-            instead.
+            Tsutsumu includes the code for bootstrapping and executing the code
+            in a bundle with the bundle for its own, textual format. That isn't
+            necessary for the `zipapp` format, which has been supported by
+            Python's standard library since version 3.5. In either case, bundles
+            execute some main module's code very much like "python -m" does. If
+            the bundled modules include exactly one __main__ module, Tsutsumu
+            automatically selects that module. If there are no or several such
+            modules or you want to execute another, non-main module, please use
+            the `-m`/`--main` option to specify the module name. Use the
+            `-b`/`--bundle-only` option to omit the runtime code from Tsutsumu's
+            textual format.
 
             Tsutsumu is © 2023 Robert Grimm. It is licensed under Apache 2.0.
             The source repository is <https://github.com/apparebit/tsutsumu>
@@ -55,6 +60,11 @@ def parser() -> ArgumentParser:
         '-b', '--bundle-only',
         action='store_true',
         help='emit only bundled files and their manifest,\nno runtime code')
+    parser.add_argument(
+        '-f', '--format',
+        choices=('text', 'zipapp'),
+        help="select Tsutsumu's textual bundle format or\nzipapp's more "
+        "compact, binary one")
     parser.add_argument(
         '-m', '--main',
         metavar='MODULE',
