@@ -2,21 +2,31 @@
 
 > つつむ (tsutsumu), Japanese for bundle
 
-Tsutsumu creates Python module bundles, that is, scripts that contain many more
-modules and supporting resources, and imports modules from bundles. That way,
-Tsutsumu enables self-contained scripts that can run anywhere a suitable Python
+Tsutsumu makes it **easy to create a module bundle**, i.e., a single file that,
+like a file archive, contains many more modules and supporting resources and,
+like a shell script, imports and executes such bundled modules. That way,
+Tsutsumu **enables self-contained scripts** that run anywhere a suitable Python
 interpreter is available—*without* creating a virtual environment or installing
-packages first.
+packages first. Tsutsumu comes with **its own, simple, textual bundle format**
+for when trust is lacking and recipients prefer to inspect code before running.
+Tsutsumu can also **target Python's builtin
+[`zipapp`](https://docs.python.org/3/library/zipapp.html) format**, which has
+the benefits of being more compact and hence more suitable for larger bundles.
+Independent of format, Tsutsumu **automatically determines the packages—and also
+the package extras—to include in a bundle**, something `zipapp` doesn't know how
+to do. (zipapp support will ship with release 0.2. So does automatic dependency
+resolution.)
 
 Having said that, Tsutsumu isn't the only option for more easily distributing
-Python code and it may very well not be the right option for your use case.
-Notably, the standard library's
-[`zipapp`](https://docs.python.org/3/library/zipapp.html) also compresses
-bundled files and [pex](https://github.com/pantsbuild/pex) files further combine
-bundling with virtual environments. That makes them more sophisticated but also
-significantly more heavyweight. Tsutsumu's simplicity makes it best suited to
-scripts that import a few dozen modules at most and should remain easily
-readable and inspectable before execution.
+Python code and it may very well not be the right option for your use case. In
+addition to the already mentioned `zipapp` module in the standard library, there
+also are, for example, [PEX](https://github.com/pantsbuild/pex) and
+[PyInstaller](https://pyinstaller.org/en/stable/), which combine bundling with
+virtual environments (PEX) and further include the Python runtime as well
+(PyInstaller). That makes them more sophisticated but also significantly more
+resource-intensive. Tsutsumu's simplicity makes it best suited to tools and
+applications of modest size that need to run in untrusted or resource-limited
+environments.
 
 The rest of this document covers Tsutsumu thusly:
 
@@ -37,7 +47,7 @@ The rest of this document covers Tsutsumu thusly:
         Harmful](https://github.com/apparebit/tsutsumu#35-importlibresources-considered-harmful)
      6. [Add a Resource Manifest
         Instead](https://github.com/apparebit/tsutsumu#36-add-a-resource-manifest-instead)
- 4. [Still Missing](https://github.com/apparebit/tsutsumu#4-still-missing)
+ 4. [Coming Soon](https://github.com/apparebit/tsutsumu#4-coming-soon)
 
 
 ## 1. Just Download and Run!
@@ -613,15 +623,20 @@ manifest, `Loader.get_data()` more than suffices for retrieving resources.
 `Loader.get_resource_reader()` only adds useless complexity.
 
 
-## 4. Still Missing
+## 4. Coming Soon
 
 I believe that Tsutsumu is ready for real-world use. However, since it hasn't
 seen wide usage, I'd hold off on mission-critical deployments for now.
 Meanwhile, Tsutsumu could use a few more features. I can think of three:
 
-  * [ ] Automatically determine module dependencies
-  * [x] Support inclusion of binary files in bundles (added in v0.2.0)
-  * [ ] Support the bundling of namespace packages
+  * [x] Automatically determine module dependencies
+  * [x] Support inclusion of binary files in bundles
+  * [-] Support the bundling of namespace packages
+
+The first two features are mostly implemented and the third also has basic
+support. Alas none of them have been released. They are scheduled for v0.2.
+Since `zipapp` also lacks the automatic dependency discovery, Tsutsumu will
+likely add support for that format, too.
 
 What else?
 
