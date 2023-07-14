@@ -10,6 +10,9 @@ from pathlib import Path
 import tomllib
 from typing import cast, Literal, overload, TypeVar
 
+from packaging.markers import Marker as PackagingMarker
+from packaging.requirements import Requirement as PackagingRequirement
+
 from .requirement import parse_requirement
 from .util import canonicalize, today_as_version
 
@@ -17,17 +20,20 @@ from .util import canonicalize, today_as_version
 __all__ = ('collect_dependencies', 'DistInfo')
 
 
-def collect_dependencies(pkgname: str, *pkgextras: str) -> 'dict[str, DistInfo]':
+def collect_dependencies(
+    pkgname: str,
+    *pkgextras: str
+) -> 'tuple[dict[str, DistInfo], dict[str, PackagingMarker]]':
     """
-    Determine the package dependencies of the given package, the dependencies of
-    those packages, and so on. This function determines the transitive closure
-    of package dependencies through a breadth-first search of the dependency
-    graph. This function does expect
+    Determine the transitive closure of package dependencies via a breadth-first
+    search of locally installed packages. This function not only returns a
+    dictionary of resolved dependencies, but also one of dependencies that were
+    never installed in the first place due to their marker evaluating to false.
     """
 
     pyproject_path = Path.cwd() / 'pyproject.toml' # type: ignore[misc]
     if pyproject_path.exists():
-        distribution = DistInfo.from_pyproject(pyproject_path)
+        distribution = DistInfo.from_pyproject(pyproject_path, pkgextras)
     else:
         distribution = DistInfo.from_installation(pkgname,pkgextras)
 
@@ -35,21 +41,35 @@ def collect_dependencies(pkgname: str, *pkgextras: str) -> 'dict[str, DistInfo]'
     pending: deque[tuple[str, tuple[str, ...], str]] = (
         deque((pkgname, pkgextras, req) for req in distribution.required_packages))
     distributions = {pkgname: distribution}
+    not_installed: dict[str, PackagingMarker] = {}
 
     while len(pending) > 0:
-        # Resolve the requirement to a distribution
+        # Resolve the requirement to a distribution. We first use Tsutsumu's
+        # lossy parser to determine if the requirement is scoped to an extra.
+        # Next, we also evaluate the marker with packaging's precise machinery,
+        # since the package may not be installed at all due to a version
+        # constraint on the operating system or Python runtime.
+
         pkgname, pkgextras, requirement = pending.pop()
         dependency, dep_extras, _, only_for_extra = parse_requirement(requirement)
+
+        req = PackagingRequirement(requirement)
+        if req.marker is not None:
+            env = {} if only_for_extra is None else {'extra': only_for_extra}
+            if not req.marker.evaluate(env):
+                not_installed[pkgname] = req.marker
+                continue # since dependency hasn't been installed
         if only_for_extra is not None and only_for_extra not in pkgextras:
             continue # since requirement is for unused package extra
         if dependency in distributions:
-            continue
+            continue # since dependency has already been processed
+
         dist = DistInfo.from_installation(dependency, dep_extras)
         distributions[dependency] = dist
         pending.extend(
             (dist.name, dist.extras, req) for req in dist.required_packages)
 
-    return distributions
+    return distributions, not_installed
 
 
 T = TypeVar('T')
@@ -68,12 +88,19 @@ class DistInfo:
     provenance: None | str = None
 
     @classmethod
-    def from_pyproject(cls, path: str | Path) -> 'DistInfo':
+    def from_pyproject(
+        cls,
+        path: str | Path,
+        extras: tuple[str, ...] = ()
+    ) -> 'DistInfo':
         with open(path, mode='rb') as file:
             metadata = cast(dict[str, object], tomllib.load(file))
         if not isinstance(project_metadata := metadata.get('project'), dict):
             raise ValueError(f'"{path}" lacks "project" section')
 
+        @overload
+        def property(key: str, typ: type[list[str]], is_optional: bool) -> list[str]:
+            ...
         @overload
         def property(key: str, typ: type[T], is_optional: Literal[False]) -> T:
             ...
@@ -82,11 +109,14 @@ class DistInfo:
             ...
         def property(key: str, typ: type[T], is_optional: bool) -> None | T:
             value = project_metadata.get(key)
-            if value is None and is_optional:
+            if isinstance(value, typ):
                 return value
-            elif isinstance(value, typ):
-                return value
-            elif value is None:
+            if value is None:
+                if typ is list:
+                    return cast(T, [])
+                if is_optional:
+                    return None
+            if value is None:
                 raise ValueError(f'"{path}" has no "{key}" entry in "project" section')
             else:
                 raise ValueError(f'"{path}" has non-{typ.__name__} "{key}" entry')
@@ -96,13 +126,16 @@ class DistInfo:
         summary = property('description', str, True)
         required_python = property('requires-python', str, True)
 
-        required_packages: tuple[str, ...] = ()
         raw_requirements = property('dependencies', list, True)
-        if raw_requirements:
-            if any(not isinstance(p, str) for p in raw_requirements):
-                raise ValueError(f'"{path}" has non-str item in "dependencies"')
-            else:
-                required_packages = tuple(raw_requirements)
+        if any(not isinstance(p, str) for p in raw_requirements):
+            raise ValueError(f'"{path}" has non-str item in "dependencies"')
+        optional_dependencies = (
+            property('optional-dependencies', dict[str,list[str]], True) or {})
+        for extra in extras:
+            if extra in optional_dependencies:
+                for dependency in optional_dependencies[extra]:
+                    raw_requirements.append(f'{dependency} ; extra == "{extra}"')
+        required_packages = tuple(raw_requirements)
 
         homepage: None | str = None
         urls = property('urls', dict, True)
@@ -118,7 +151,7 @@ class DistInfo:
 
         if version is None:
             # pyproject.toml may omit version if it is dynamic.
-            if 'version' in (property('dynamic', list, True) or ()):
+            if 'version' in property('dynamic', list, True):
                 package = importlib.import_module(name)
                 version = getattr(package, '__version__')
                 assert isinstance(version, str) # type: ignore[misc]  # due to Any
@@ -127,7 +160,7 @@ class DistInfo:
 
         return cls(
             name,
-            (),
+            extras,
             version=version,
             summary=summary,
             homepage=homepage,
