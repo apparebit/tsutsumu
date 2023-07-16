@@ -33,7 +33,7 @@ classifiers = [
     "Topic :: System :: Software Distribution",
     "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = ["packaging"]
 dynamic = ["version"]
 
 [project.optional-dependencies]
@@ -42,6 +42,7 @@ dev = [
     "mypy",
     "flit",
     "vermin",
+    "black",
 ]
 
 [project.urls]
@@ -81,3 +82,7 @@ show_error_codes = true
 [[tool.mypy.overrides]]
 module = "tmp.*"
 follow_imports = "silent"
+
+[tool.black]
+target-version = ['py311']
+skip-string-normalization = true
