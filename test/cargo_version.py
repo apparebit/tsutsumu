@@ -19,8 +19,8 @@ def test_parse_version() -> None:
         ('v1.2.3.dev1', (0, (1, 2, 3), None, None, None, 1, None)),
         ('v1.2.3dev2', (0, (1, 2, 3), None, None, None, 2, None)),
         ('v1.2.3.pre-4.post-5.dev-6', (0, (1, 2, 3), 'rc', 4, 5, 6, None)),
-        ('1.2.3+local', (0, (1, 2, 3), None, None, None, None, 'local')),
+        ('1.2.3+local', (0, (1, 2, 3), None, None, None, None, ('local',))),
     ):
         actual = Version.of(input)
         print(f'    {actual!s:>20} --- {actual!r}')
-        assert actual == expected
+        assert actual.astuple == expected

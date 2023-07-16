@@ -155,6 +155,10 @@ class Version:
         self._key = self._ver.to_key()
 
     @property
+    def astuple(self) -> VersionData:
+        return self._ver
+
+    @property
     def epoch(self) -> int:
         return self._ver[0]
 
