@@ -2,7 +2,7 @@ import re
 from typing import cast
 
 from .marker import extract_extra
-from .util import canonicalize
+from cargo.name import canonicalize
 
 
 __all__ = ('parse_requirement',)
