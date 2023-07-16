@@ -13,17 +13,18 @@ from typing import cast, Literal, overload, TypeVar
 from packaging.markers import Marker as PackagingMarker
 from packaging.requirements import Requirement as PackagingRequirement
 
+from cargo.name import canonicalize
+
 from .requirement import parse_requirement
-from .util import canonicalize, today_as_version
+from .util import today_as_version
 
 
-__all__ = ('collect_dependencies', 'DistInfo')
+__all__ = ("collect_dependencies", "DistInfo")
 
 
 def collect_dependencies(
-    pkgname: str,
-    *pkgextras: str
-) -> 'tuple[dict[str, DistInfo], dict[str, PackagingMarker]]':
+    pkgname: str, *pkgextras: str
+) -> "tuple[dict[str, DistInfo], dict[str, PackagingMarker]]":
     """
     Determine the transitive closure of package dependencies via a breadth-first
     search of locally installed packages. This function not only returns a
@@ -31,15 +32,16 @@ def collect_dependencies(
     never installed in the first place due to their marker evaluating to false.
     """
 
-    pyproject_path = Path.cwd() / 'pyproject.toml' # type: ignore[misc]
+    pyproject_path = Path.cwd() / "pyproject.toml"  # type: ignore[misc]
     if pyproject_path.exists():
         distribution = DistInfo.from_pyproject(pyproject_path, pkgextras)
     else:
-        distribution = DistInfo.from_installation(pkgname,pkgextras)
+        distribution = DistInfo.from_installation(pkgname, pkgextras)
 
     # Breadth-first search requires a queue
-    pending: deque[tuple[str, tuple[str, ...], str]] = (
-        deque((pkgname, pkgextras, req) for req in distribution.required_packages))
+    pending: deque[tuple[str, tuple[str, ...], str]] = deque(
+        (pkgname, pkgextras, req) for req in distribution.required_packages
+    )
     distributions = {pkgname: distribution}
     not_installed: dict[str, PackagingMarker] = {}
 
@@ -55,24 +57,24 @@ def collect_dependencies(
 
         req = PackagingRequirement(requirement)
         if req.marker is not None:
-            env = {} if only_for_extra is None else {'extra': only_for_extra}
+            env = {} if only_for_extra is None else {"extra": only_for_extra}
             if not req.marker.evaluate(env):
                 not_installed[pkgname] = req.marker
-                continue # since dependency hasn't been installed
+                continue  # since dependency hasn't been installed
         if only_for_extra is not None and only_for_extra not in pkgextras:
-            continue # since requirement is for unused package extra
+            continue  # since requirement is for unused package extra
         if dependency in distributions:
-            continue # since dependency has already been processed
+            continue  # since dependency has already been processed
 
         dist = DistInfo.from_installation(dependency, dep_extras)
         distributions[dependency] = dist
-        pending.extend(
-            (dist.name, dist.extras, req) for req in dist.required_packages)
+        pending.extend((dist.name, dist.extras, req) for req in dist.required_packages)
 
     return distributions, not_installed
 
 
-T = TypeVar('T')
+T = TypeVar("T")
+
 
 @dataclass(frozen=True, slots=True)
 class DistInfo:
@@ -89,24 +91,25 @@ class DistInfo:
 
     @classmethod
     def from_pyproject(
-        cls,
-        path: str | Path,
-        extras: tuple[str, ...] = ()
-    ) -> 'DistInfo':
-        with open(path, mode='rb') as file:
+        cls, path: str | Path, extras: tuple[str, ...] = ()
+    ) -> "DistInfo":
+        with open(path, mode="rb") as file:
             metadata = cast(dict[str, object], tomllib.load(file))
-        if not isinstance(project_metadata := metadata.get('project'), dict):
+        if not isinstance(project_metadata := metadata.get("project"), dict):
             raise ValueError(f'"{path}" lacks "project" section')
 
         @overload
         def property(key: str, typ: type[list[str]], is_optional: bool) -> list[str]:
             ...
+
         @overload
         def property(key: str, typ: type[T], is_optional: Literal[False]) -> T:
             ...
+
         @overload
         def property(key: str, typ: type[T], is_optional: Literal[True]) -> None | T:
             ...
+
         def property(key: str, typ: type[T], is_optional: bool) -> None | T:
             value = project_metadata.get(key)
             if isinstance(value, typ):
@@ -121,16 +124,17 @@ class DistInfo:
             else:
                 raise ValueError(f'"{path}" has non-{typ.__name__} "{key}" entry')
 
-        name = canonicalize(property('name', str, False))
-        version = property('version', str, True)
-        summary = property('description', str, True)
-        required_python = property('requires-python', str, True)
+        name = canonicalize(property("name", str, False))
+        version = property("version", str, True)
+        summary = property("description", str, True)
+        required_python = property("requires-python", str, True)
 
-        raw_requirements = property('dependencies', list, True)
+        raw_requirements = property("dependencies", list, True)
         if any(not isinstance(p, str) for p in raw_requirements):
             raise ValueError(f'"{path}" has non-str item in "dependencies"')
-        optional_dependencies = (
-            property('optional-dependencies', dict[str,list[str]], True) or {})
+        optional_dependencies = cast(
+            dict[str, list[str]], property("optional-dependencies", dict, True)
+        ) or cast(dict[str, list[str]], {})
         for extra in extras:
             if extra in optional_dependencies:
                 for dependency in optional_dependencies[extra]:
@@ -138,9 +142,9 @@ class DistInfo:
         required_packages = tuple(raw_requirements)
 
         homepage: None | str = None
-        urls = property('urls', dict, True)
+        urls = property("urls", dict, True)
         if urls is not None:
-            for location in ('homepage', 'repository', 'documentation'):
+            for location in ("homepage", "repository", "documentation"):
                 if location not in urls:
                     continue
                 url = urls[location]
@@ -151,10 +155,10 @@ class DistInfo:
 
         if version is None:
             # pyproject.toml may omit version if it is dynamic.
-            if 'version' in property('dynamic', list, True):
+            if "version" in property("dynamic", list, True):
                 package = importlib.import_module(name)
-                version = getattr(package, '__version__')
-                assert isinstance(version, str) # type: ignore[misc]  # due to Any
+                version = getattr(package, "__version__")
+                assert isinstance(version, str)  # type: ignore[misc]  # due to Any
             else:
                 raise ValueError(f'"{path}" has no "version" in "project" section')
 
@@ -176,7 +180,7 @@ class DistInfo:
         extras: Sequence[str] = (),
         *,
         version: None | str = None,
-    ) -> 'DistInfo':
+    ) -> "DistInfo":
         name = canonicalize(name)
 
         if version is None:
@@ -185,19 +189,28 @@ class DistInfo:
             except ModuleNotFoundError:
                 return cls(name, tuple(extras))
 
-        version = distribution.version
-        summary = distribution.metadata['Summary']
-        homepage = distribution.metadata['Home-page']
-        required_python = distribution.metadata['Requires-Python']
+        # Distribution's implementation reads and parses the metadata file on
+        # every access to its metadata property. Since its other properties
+        # internally use the metadata property as well, it's really easy to read
+        # and parse the same file over and over again.
+        metadata = distribution.metadata
 
-        required_packages: tuple[str, ...] = ()
-        raw_requirements = distribution.requires
-        if raw_requirements is not None:
-            required_packages = tuple(raw_requirements)
+        version = metadata["Version"]
+        summary = metadata["Summary"]
+        homepage = metadata["Home-page"]
+        required_python = metadata["Requires-Python"]
+        required_packages = tuple(
+            cast(
+                list[str],
+                metadata.get_all("Requires-Dist", failobj=cast(list[str], [])),
+            )
+        )
+        # provided_extras = metadata.get_all('Provides-Extra')
+        # provided_distributions = metadata.get_all('Provides-Dist')
 
         provenance = None
-        if hasattr(distribution, '_path'):
-            provenance = str(cast(Path, getattr(distribution, '_path')).absolute())
+        if hasattr(distribution, "_path"):
+            provenance = str(cast(Path, getattr(distribution, "_path")).absolute())
 
         return cls(
             name,
@@ -212,7 +225,7 @@ class DistInfo:
 
     def __post_init__(self) -> None:
         version = today_as_version() if self.version is None else self.version
-        object.__setattr__(self, 'effective_version', version)
+        object.__setattr__(self, "effective_version", version)
 
     def __hash__(self) -> int:
         return hash(self.name) + hash(self.version)
@@ -223,31 +236,31 @@ class DistInfo:
         return self.name == other.name and self.version == other.version
 
     def __repr__(self) -> str:
-        version = '?.?' if self.version is None else self.version
-        return f'<DistInfo {self.name} {version}>'
+        version = "?.?" if self.version is None else self.version
+        return f"<DistInfo {self.name} {version}>"
 
     def metadata_path_content(self) -> tuple[str, str]:
-        metadata_path = f'{self.name}-{self.effective_version}.dist-info/METADATA'
+        metadata_path = f"{self.name}-{self.effective_version}.dist-info/METADATA"
         lines = [
-            'Metadata-Version: 2.1',
-            'Name: ' + self.name,
-            'Version: ' + self.effective_version
+            "Metadata-Version: 2.1",
+            "Name: " + self.name,
+            "Version: " + self.effective_version,
         ]
 
         if self.summary:
-            lines.append('Summary: ' + self.summary)
+            lines.append("Summary: " + self.summary)
         if self.homepage:
-            lines.append('Home-page: ' + self.homepage)
+            lines.append("Home-page: " + self.homepage)
         if self.required_python:
-            lines.append('Requires-Python: ' + self.required_python)
+            lines.append("Requires-Python: " + self.required_python)
         for requirement in self.required_packages:
-            lines.append('Requires-Dist: ' + requirement)
+            lines.append("Requires-Dist: " + requirement)
 
-        return metadata_path, '\n'.join(lines) + '\n'
+        return metadata_path, "\n".join(lines) + "\n"
 
     def record_path_content(self, files: Iterable[str]) -> tuple[str, str]:
-        prefix = f'{self.name}-{self.effective_version}.dist-info/'
-        record_path = prefix + 'RECORD'
-        all_files = itertools.chain((prefix + 'METADATA', record_path), files)
-        content = ',,\n'.join(f'"{f}"' if ',' in f else f for f in all_files) + ',,\n'
+        prefix = f"{self.name}-{self.effective_version}.dist-info/"
+        record_path = prefix + "RECORD"
+        all_files = itertools.chain((prefix + "METADATA", record_path), files)
+        content = ",,\n".join(f'"{f}"' if "," in f else f for f in all_files) + ",,\n"
         return record_path, content
