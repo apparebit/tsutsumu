@@ -1,12 +1,13 @@
 #!.venv/bin/python
 
 import doctest
+from importlib import import_module
 from pathlib import Path
 import subprocess
 import shutil
 import sys
 import traceback
-from typing import TextIO
+from typing import cast, TextIO
 
 
 class Console:
@@ -62,23 +63,19 @@ def main() -> None:
 
     # ----------------------------------------------------------------------------------
 
-    console.info('Testing extra extraction from requirements...')
-    from tsutsumu.distribution.requirement import parse_requirement
+    console.info('Running unit tests...')
 
-    for requirement, expected_result in (
-        ('spam', ('spam', [], [], None)),
-        ('spam [ can ,label]', ('spam', ['can', 'label'], [], None)),
-        ('spam >6.6.5, < 6.6.6', ('spam', [], ['>6.6.5', '<6.6.6'], None)),
-        ('spam ; extra == "can"', ('spam', [], [], 'can')),
-        ('spam; "can"==  extra', ('spam', [], [], 'can')),
-        ('spam[bacon](==2.0)', ('spam', ['bacon'], ['==2.0'], None)),
-        ('spam; os_name != "bacon" and os_name != "ham" and extra == "tofu"',
-            ('spam', [], [], 'tofu')),
-        ('spam; extra == "bacon" or "bacon" == extra', ('spam', [], [], 'bacon')),
+    for module in (
+        'test.cargo_version',
+        'test.cargo_extra',
     ):
-        requirement_quadruple = parse_requirement(requirement)
-        console.detail(f'{requirement_quadruple}')
-        assert requirement_quadruple == expected_result
+        subprocess.run([
+            sys.executable,
+            TESTSCRIPT,
+            'run-test-module',
+            module,
+        ], check=True)
+        console.detail(f'Ran tests in "{module}"')
 
     # ----------------------------------------------------------------------------------
 
@@ -94,12 +91,13 @@ def main() -> None:
         ('summary', 'Simple, flexible module bundling for Python'),
         ('homepage', 'https://github.com/apparebit/tsutsumu'),
         ('required_python', '>=3.7'),
-        ('required_packages', ()),
+        ('required_packages', ('packaging',)),
         ('provenance', str(pyproject_path)),
     ):
         actual = getattr(distinfo, key) # type: ignore[misc]
         message = f'distinfo.{key} is {actual} instead of {expected}' #type:ignore[misc]
         assert actual == expected, message  # type: ignore[misc]
+
     # ----------------------------------------------------------------------------------
 
     console.info('Rebuilding repository bundles...')
@@ -253,7 +251,7 @@ def main() -> None:
     console.info('Comparing repackaged Tsutsumu modules to originals...')
     completion = subprocess.run([
             sys.executable,
-            'test.py',
+            TESTSCRIPT,
             'run-repackaged-module-test'
         ],
     )
@@ -271,11 +269,26 @@ def main() -> None:
 
 # ======================================================================================
 
-def repackaged_module_test() -> None:
+def run_test_module(name: str) -> None:
+    module = import_module(name)
+
+    for key in dir(module):
+        if not key.startswith('test_'):
+            continue
+        value: object = getattr(module, key)
+        if not callable(value):
+            continue
+        value()
+
+# --------------------------------------------------------------------------------------
+
+def run_repackaged_module_test() -> None:
     # We cannot import Bundle and Toolbox without also importing tsutsumu's
     # __init__ and bundle modules, which breaks repackage(). At the same time,
     # we can still read, compile, and exec the bundle module.
-    cwd = Path('.').absolute()
+
+    # mypy: Expression type contains "Any" (has type "type[Path]") — Huh??
+    cwd = Path.cwd().absolute() # type: ignore[misc]
 
     mod_bundle_path = cwd / 'tsutsumu' / 'bundle.py'
     mod_bundle_binary = compile(
@@ -300,7 +313,7 @@ def repackaged_module_test() -> None:
     package_path = cwd / 'tsutsumu'
     bundled_package_path = repackaged_path / 'tsutsumu'
 
-    code = 0
+    is_different = False
     for module in ('__init__.py', 'bundle.py'):
         original = (package_path / module).read_bytes()
         repackaged = bundle[str(bundled_package_path / module)] # type: ignore[misc]
@@ -309,16 +322,22 @@ def repackaged_module_test() -> None:
         else:
             print(f'Repackaged "tsutsumu/{module}" did NOT match original:')
             print(f'{repackaged!r}') # type: ignore[misc]
-            code = 1
+            is_different = True
 
-    sys.exit(code)
+    if is_different:
+        sys.exit(1)
 
+# --------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
+    TESTSCRIPT = sys.argv[0]
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == 'run-repackaged-module-test':
-            repackaged_module_test()
+        if len(sys.argv) > 2 and sys.argv[1] == 'run-test-module':
+            run_test_module(sys.argv[2])
+        elif len(sys.argv) > 1 and sys.argv[1] == 'run-repackaged-module-test':
+            run_repackaged_module_test()
         else:
             main()
     except Exception as x:
         traceback.print_exception(x)
+        sys.exit(1)
