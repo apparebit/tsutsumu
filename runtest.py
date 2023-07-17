@@ -1,19 +1,24 @@
 #!.venv/bin/python
 
+# mypy: disallow_any_expr = false
+
+from dataclasses import dataclass
 import doctest
 from importlib import import_module
+import inspect
 from pathlib import Path
 import subprocess
 import shutil
 import sys
 import traceback
-from typing import cast, TextIO
+from typing import cast, Self, TextIO
 
 
 class Console:
     CSI = '\x1b['
     BOLD = '1'
     REGULAR = '0'
+    BLUE_GREY = '38;5;17'
     GREEN = '1;32'
     RED = '1;31'
     RESET = '39;0'
@@ -25,23 +30,64 @@ class Console:
     def sgr(self, code: str) -> str:
         return f'{self.CSI}{code}m' if self._is_tty else ''
 
+    # • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • •
+
+    def write_grey(self, message: str) -> Self:
+        self._stream.write(f'{self.sgr(self.BLUE_GREY)}{message}{self.sgr(self.RESET)}')
+        return self
+
+    def write_bold(self, message: str) -> Self:
+        self._stream.write(f'{self.sgr(self.BOLD)}{message}{self.sgr(self.REGULAR)}')
+        return self
+
+    def write_red(self, message: str) -> Self:
+        self._stream.write(f'{self.sgr(self.RED)}{message}{self.sgr(self.RESET)}')
+        return self
+
+    def write(self, message: str) -> Self:
+        self._stream.write(message)
+        return self
+
+    def newline(self) -> Self:
+        self._stream.write('\n')
+        return self
+
+    # • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • •
+
+    def trace(self, message: str) -> None:
+        self.write_grey(message).newline()
+
     def detail(self, message: str) -> None:
         self._stream.write(f'{message}\n')
 
     def info(self, message: str) -> None:
-        self._stream.write(f'{self.sgr(self.BOLD)}{message}{self.sgr(self.REGULAR)}\n')
+        self.write_bold(message).newline()
 
     def success(self, message: str) -> None:
-        self._stream.write(f'{self.sgr(self.GREEN)}{message}{self.sgr(self.RESET)}\n')
+        self._stream.write(f'{self.sgr(self.GREEN)}{message}{self.sgr(self.RESET)}')
+        self.newline()
 
     def error(self, message: str) -> None:
-        self._stream.write(f'{self.sgr(self.RED)}{message}{self.sgr(self.RESET)}\n')
+        self.write_red(message).newline()
+
+    def exception(self, x: Exception) -> None:
+        lines = traceback.format_exception(x)
+        for line in lines[:-1]:
+            self._stream.write(line)
+        self.write_red(lines[-1])
+
+
+@dataclass
+class Options:
+    console: Console
+    module_name: str = ''
+    verbose: bool = False
+
 
 # ======================================================================================
 
-def main() -> None:
-    console = Console(sys.stdout)
-
+def main(options: Options) -> int:
+    console = options.console
     console.info("Getting started with Tsutsumu's test suite...")
     console.detail(f'Running "{sys.executable}"')
     console.detail(f' - Python {sys.version}')
@@ -69,13 +115,14 @@ def main() -> None:
         'test.cargo_version',
         'test.cargo_extra',
     ):
+        console.detail(f'╭──── {module}')
         subprocess.run([
             sys.executable,
             TESTSCRIPT,
             'run-test-module',
             module,
         ], check=True)
-        console.detail(f'Ran tests in "{module}"')
+        console.detail('╰─╼')
 
     # ----------------------------------------------------------------------------------
 
@@ -94,9 +141,9 @@ def main() -> None:
         ('required_packages', ('packaging',)),
         ('provenance', str(pyproject_path)),
     ):
-        actual = getattr(distinfo, key) # type: ignore[misc]
-        message = f'distinfo.{key} is {actual} instead of {expected}' #type:ignore[misc]
-        assert actual == expected, message  # type: ignore[misc]
+        actual = getattr(distinfo, key)
+        message = f'distinfo.{key} is {actual} instead of {expected}'
+        assert actual == expected, message
 
     # ----------------------------------------------------------------------------------
 
@@ -244,7 +291,7 @@ def main() -> None:
 
     if err_count > 0:
         console.error(f'Bundling of binary files is broken!')
-        sys.exit(1)
+        raise SystemExit(1)
 
     # ----------------------------------------------------------------------------------
 
@@ -265,30 +312,52 @@ def main() -> None:
     console.success('W00t! All tests passed!')
 
     shutil.rmtree(tmpdir)
-    sys.exit(0)
+    return 0
 
 # ======================================================================================
 
-def run_test_module(name: str) -> None:
-    module = import_module(name)
+def run_test_module(options: Options) -> int:
+    console = options.console
+    module = import_module(options.module_name)
 
+    null_logger = lambda _: None
+    default_logger = lambda msg: console.write('│   ').write_grey(f'{msg}').newline()
+
+    errors = 0
     for key in dir(module):
         if not key.startswith('test_'):
             continue
-        value: object = getattr(module, key)
+        value = getattr(module, key)
         if not callable(value):
             continue
-        value()
+
+        console.detail(f'├─ {value.__name__}')
+        sig = inspect.signature(value)
+
+        try:
+            if 'logger' in sig.parameters and 'debug' in sig.parameters:
+                value(logger=default_logger, debug=True)
+            elif 'logger' in sig.parameters:
+                value(logger=null_logger)
+            else:
+                value()
+        except Exception as x:
+            console.exception(x)
+            errors += 1
+
+    return bool(errors)
 
 # --------------------------------------------------------------------------------------
 
-def run_repackaged_module_test() -> None:
+def run_repackaged_module_test(options: Options) -> int:
+    console = options.console
+
     # We cannot import Bundle and Toolbox without also importing tsutsumu's
     # __init__ and bundle modules, which breaks repackage(). At the same time,
     # we can still read, compile, and exec the bundle module.
 
     # mypy: Expression type contains "Any" (has type "type[Path]") — Huh??
-    cwd = Path.cwd().absolute() # type: ignore[misc]
+    cwd = Path.cwd().absolute()
 
     mod_bundle_path = cwd / 'tsutsumu' / 'bundle.py'
     mod_bundle_binary = compile(
@@ -304,10 +373,10 @@ def run_repackaged_module_test() -> None:
 
     repackaged_path = cwd / 'tmp' / 'repackaged-bundler.py'
     version, manifest = (
-        Toolbox.load_meta_data(repackaged_path)) # type: ignore[attr-defined,misc]
-    bundle = (Bundle.install( # type: ignore[attr-defined,misc]
-        repackaged_path, version, manifest)) # type: ignore[misc]
-    bundle.repackage() # type: ignore[misc]
+        Toolbox.load_meta_data(repackaged_path)) # type: ignore[attr-defined]
+    bundle = (Bundle.install( # type: ignore[attr-defined]
+        repackaged_path, version, manifest))
+    bundle.repackage()
 
     # Compare repackaged modules to their originals.
     package_path = cwd / 'tsutsumu'
@@ -316,28 +385,58 @@ def run_repackaged_module_test() -> None:
     is_different = False
     for module in ('__init__.py', 'bundle.py'):
         original = (package_path / module).read_bytes()
-        repackaged = bundle[str(bundled_package_path / module)] # type: ignore[misc]
-        if original == repackaged: # type: ignore[misc]
-            print(f'Repackaged "tsutsumu/{module}" matched original')
+        repackaged = bundle[str(bundled_package_path / module)]
+        if original == repackaged:
+            console.detail(f'Repackaged "tsutsumu/{module}" matched original')
         else:
-            print(f'Repackaged "tsutsumu/{module}" did NOT match original:')
-            print(f'{repackaged!r}') # type: ignore[misc]
+            console.error(f'Repackaged "tsutsumu/{module}" did NOT match original:')
+            console.detail(f'{repackaged!r}')
             is_different = True
 
-    if is_different:
-        sys.exit(1)
+    return is_different
 
 # --------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
     TESTSCRIPT = sys.argv[0]
     try:
-        if len(sys.argv) > 2 and sys.argv[1] == 'run-test-module':
-            run_test_module(sys.argv[2])
-        elif len(sys.argv) > 1 and sys.argv[1] == 'run-repackaged-module-test':
-            run_repackaged_module_test()
-        else:
-            main()
+        options = Options(Console(sys.stdout))
+        console = options.console
+
+        fn = main
+        module = None
+        for arg in sys.argv[1:]:
+            if arg == '-v':
+                options.verbose = True
+            elif arg == 'run-test-module':
+                fn = run_test_module
+            elif arg == 'run-repackaged-module-test':
+                fn = run_repackaged_module_test
+            elif fn == run_test_module and options.module_name == '':
+                options.module_name = arg
+            else:
+                raise SystemExit(f'unrecognized command line argument "{arg}"')
+
+        if fn == run_test_module and options.module_name == '':
+            raise SystemExit('can\'t "run-test-module" without module name')
+
+        sys.exit(fn(options))
+
+    except SystemExit as x:
+        if isinstance(x.args[0], str):
+            console.error(x.args[0])
+            code = 1
+        elif isinstance(x.args[0], int):
+            code = x.args[0]
+        sys.exit(code)
+
+    except subprocess.CalledProcessError as x:
+        cmd = list(x.cmd)
+        if (Path('.') / '.venv/bin/python').samefile(cmd[0]):
+            cmd[0] = 'python'
+        console.info(
+            f'command "{" ".join(cmd)}" failed with exit status {x.returncode}')
+
     except Exception as x:
-        traceback.print_exception(x)
+        console.exception(x)
         sys.exit(1)
