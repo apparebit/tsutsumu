@@ -469,7 +469,7 @@ MARKER_SYNTAX = re.compile(
         | (?P<COMP> <=? | != | ===? | >=? | ~= | not\\s+in | in)
         | (?P<BOOL> and | or)
         | (?P<LIT> '[^']*' | \x22[^\x22]*\x22)
-        | (?P<VAR>  [a-z] (?: [a-z_]* [a-z])?)
+        | (?P<VAR>  [a-z] (?: [a-z._-]* [a-z])?)
     \x22\x22\x22,
     re.VERBOSE,
 )
@@ -1291,11 +1291,11 @@ __manifest__ = {
     "tsutsumu/debug.py": ("t", 5_333, 1_229),
     "tsutsumu/distribution/__init__.py": ("t", 6_682, 103),
     "tsutsumu/distribution/distinfo.py": ("t", 6_905, 10_618),
-    "tsutsumu/distribution/marker.py": ("t", 17_641, 9_016),
-    "tsutsumu/distribution/requirement.py": ("t", 26_780, 1_407),
-    "tsutsumu/distribution/storage.py": ("t", 28_306, 3_229),
-    "tsutsumu/distribution/util.py": ("t", 31_651, 176),
-    "tsutsumu/maker.py": ("t", 31_931, 13_460),
+    "tsutsumu/distribution/marker.py": ("t", 17_641, 9_018),
+    "tsutsumu/distribution/requirement.py": ("t", 26_782, 1_407),
+    "tsutsumu/distribution/storage.py": ("t", 28_308, 3_229),
+    "tsutsumu/distribution/util.py": ("t", 31_653, 176),
+    "tsutsumu/maker.py": ("t", 31_933, 13_460),
     "tsutsumu/py.typed": ("t", 0, 0),
 }
 
