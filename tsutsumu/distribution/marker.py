@@ -17,7 +17,7 @@ MARKER_SYNTAX = re.compile(
         | (?P<COMP> <=? | != | ===? | >=? | ~= | not\s+in | in)
         | (?P<BOOL> and | or)
         | (?P<LIT> '[^']*' | "[^"]*")
-        | (?P<VAR>  [a-z] (?: [a-z_]* [a-z])?)
+        | (?P<VAR>  [a-z] (?: [a-z._-]* [a-z])?)
     """,
     re.VERBOSE,
 )
