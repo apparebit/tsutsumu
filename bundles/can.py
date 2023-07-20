@@ -469,7 +469,7 @@ class Bundle(Loader):
 
     def exec_module(self, module: "ModuleType") -> None:
         assert module.__spec__ is not None, "module must have spec"
-        exec(self.get_code(module.__spec__.name), module.__dict__)  # type: ignore[misc]
+        exec(self.get_code(module.__spec__.name), module.__dict__)
 
     def is_package(self, fullname: str) -> bool:
         return self._locate(fullname)[1] is not None
