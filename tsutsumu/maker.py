@@ -146,7 +146,7 @@ class BundleMaker:
     # ----------------------------------------------------------------------------------
 
     def run(self) -> None:
-        files = sorted(self.list_files(), key=lambda f: f.key) # type: ignore[misc]
+        files = sorted(self.list_files(), key=lambda f: f.key)
         main = None if self._bundle_only else self.select_main(files)
 
         # context's type annotation is based on the observation that open()'s
