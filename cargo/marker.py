@@ -338,37 +338,45 @@ def distill_extra(tokens: TokenString) -> Token:
     # that the marker expression syntax is very simple.
 
     while True:
-        # Shift an operand onto the stack
+        # (1) Shift operand onto stack
         if tokens.has_next():
             if tokens.peek().tag is T.OPEN:
+                # RECURSE parenthesized
                 parenthesized = tokens.parenthesized()
                 stack.shift(distill_extra(parenthesized))
+                # SHIFT result from recursion as operand
             elif tokens.peek().tag in (T.VAR, T.LIT):
+                # SHIFT operand
                 stack.shift(tokens.next())
             else:
                 raise SyntaxError(f'expected operand, found "{tokens}"')
-        # Try to reduce a comparison
+
+        # (2) Reduce comparisons and conjunctions
         if stack.is_reducible(T.COMP):
+            # REDUCE comparison
             stack.reduce_with(apply_operator)
-        # Try to reduce a conjunction. Top of stack mustn't be variable or literal.
         if stack.is_reducible(T.BOOL, 'and', T.EXTRA, T.NOT_EXTRA):
+            # REDUCE conjunction
             stack.reduce_with(apply_operator)
-        # Shift an operator onto the stack and restart cascade.
+
+        # (3) Shift operator onto stack and restart from top
         if tokens.has_next():
             if tokens.peek().tag in (T.COMP, T.BOOL):
+                # SHIFT operator
                 stack.shift(tokens.next())
             else:
                 raise SyntaxError(f'expected operator, found "{tokens}"')
             continue
-        # All tokens have been consumed. All comparisons and conjunctions have
-        # been reduced. That should leave only disjunctions.
+
+        # (4) Break out of loop when all tokens have been consumed.
         if len(stack) > 1 and not stack.is_reducible(T.BOOL, "or"):
             raise SyntaxError('expected operand but marker ended already')
         break
 
-    # Reduce disjunctions until the stack has only one token. That's our result.
+    # (5) Reduce disjunctions until stack has one token left. That's our result.
     while len(stack) > 1:
         assert stack.is_reducible(T.BOOL, "or")
+        # REDUCE disjunction
         stack.reduce_with(apply_operator)
 
     return stack.unwrap()
