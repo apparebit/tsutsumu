@@ -24,13 +24,12 @@ import logging
 import re
 import sys
 import time
-from typing import cast, Literal, NamedTuple, NotRequired, TypedDict
+from typing import cast, Literal, NamedTuple, TypedDict
 
 import requests
-from packaging.version import Version as PackagingVersion
-
 
 from .name import canonicalize, split_hash
+from .version import Version
 
 
 __all__ = ()
@@ -56,35 +55,45 @@ PYPI_CONTENT_TYPES = re.compile(
 
 ANCHOR_ATTRIBUTES = {
     "href": "url",
-    "data-requires-python": "requires-python",
-    "data-core-metadata": "core-metadata",  # previously data-dist-info-metadata
+    "data-requires-python": "requires_python",
+    "data-core-metadata": "core_metadata",  # previously data-dist-info-metadata
 }
 
-JSON_ATTRIBUTES = set(
-    [
-        "url",
-        "requires-python",
-        "core-metadata",
-        "hashes",
-    ]
-)
+JSON_ATTRIBUTES = {
+    "url": "url",
+    "requires-python": "requires_python",
+    "core-metadata": "core_metadata",
+    "hashes": "hashes",
+}
 
 # --------------------------------------------------------------------------------------
 
 
-class HashValue(TypedDict):
+class HashValue(TypedDict, total=False):
     sha256: str
 
-ReleaseMetadata = TypedDict('ReleaseMetadata', {
-    'filename': str,
-    'name': str,
-    'version': str | PackagingVersion,
-    'url': NotRequired[str],
-    'hashes': NotRequired[HashValue],
-    'core-metadata': NotRequired[Literal[False] | HashValue],
-    'requires-python': NotRequired[str],
-    'api-version': NotRequired[str],
-})
+class ReleaseMetadata(TypedDict, total=False):
+    filename: str
+    name: str
+    version: str | Version
+    url: str
+    hashes: HashValue
+    core_metadata: Literal[False] | HashValue
+    requires_python: str
+    api_version: str
+
+class PackageMetadata(TypedDict, total=False):
+    provenance: str
+
+    name: str
+    latest_version: str | Version
+    url: str
+    hash: HashValue
+    core_metadata: Literal[False] | HashValue
+    requires_python: str
+
+
+
 
 
 # --------------------------------------------------------------------------------------
@@ -129,9 +138,9 @@ def retrieve_metadata(name: str) -> None | ReleaseMetadata:
         logger.warning('Unable to ingest metadata from %s for %s', format, name)
     else:
         info["version"] = str(info["version"])
-        pep658 = "✅" if "core-metadata" in info else "❌"
+        pep658 = "✅" if "core_metadata" in info else "❌"
         logger.info("%s %s v%s:", pep658, name, info["version"])
-        logger.info("    requires-pathon=%s", info["requires-python"])
+        logger.info("    requires_pathon=%s", info["requires_python"])
         logger.info("    filename=%s", info["filename"])
         logger.info("    href=%s", info["url"])
     return info
@@ -159,12 +168,12 @@ def ingest_json(data: dict[str, object]) -> None | ReleaseMetadata:
             if key == "hashes":
                 latest["hashes"] = cast(HashValue, value).copy()
             if key == "core-metadata" and isinstance(value, dict):
-                latest["core-metadata"] = cast(HashValue, value).copy()
+                latest["core_metadata"] = cast(HashValue, value).copy()
             elif key in JSON_ATTRIBUTES:
-                latest[key] = value  # type: ignore[literal-required]
+                latest[JSON_ATTRIBUTES[key]] = value  # type: ignore[literal-required]
 
     if api_version is not None and latest is not None:
-        latest["api-version"] = api_version
+        latest["api_version"] = api_version
     return latest
 
 
@@ -196,7 +205,7 @@ def ingest_html(html: str) -> None | ReleaseMetadata:
             latest["url"] = url
 
     if api_version is not None and latest is not None:
-        latest["api-version"] = api_version
+        latest["api_version"] = api_version
     return latest
 
 
@@ -313,10 +322,10 @@ def find_latest_release(
         return None
 
     assert version is not None
-    version_object = PackagingVersion(version)  # FIXME: replace with cargo's version
+    version_object = Version(version)
     if (
         latest_so_far is not None and
-        version_object < latest_so_far["version"] # type: ignore[operator]
+        version_object < latest_so_far["version"]
     ) :
         logger.debug("Skipping wheel %s < %s", version, latest_so_far["version"])
         return None
