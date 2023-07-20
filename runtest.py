@@ -5,88 +5,36 @@
 from dataclasses import dataclass
 import doctest
 from importlib import import_module
-import inspect
 from pathlib import Path
 import subprocess
 import shutil
 import sys
-import traceback
-from typing import cast, Self, TextIO
 
-
-class Console:
-    CSI = '\x1b['
-    BOLD = '1'
-    REGULAR = '0'
-    BLUE_GREY = '38;5;17'
-    GREEN = '1;32'
-    RED = '1;31'
-    RESET = '39;0'
-
-    def __init__(self, stream: 'TextIO') -> None:
-        self._is_tty = stream.isatty()
-        self._stream = stream
-
-    def sgr(self, code: str) -> str:
-        return f'{self.CSI}{code}m' if self._is_tty else ''
-
-    # • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • •
-
-    def write_grey(self, message: str) -> Self:
-        self._stream.write(f'{self.sgr(self.BLUE_GREY)}{message}{self.sgr(self.RESET)}')
-        return self
-
-    def write_bold(self, message: str) -> Self:
-        self._stream.write(f'{self.sgr(self.BOLD)}{message}{self.sgr(self.REGULAR)}')
-        return self
-
-    def write_red(self, message: str) -> Self:
-        self._stream.write(f'{self.sgr(self.RED)}{message}{self.sgr(self.RESET)}')
-        return self
-
-    def write(self, message: str) -> Self:
-        self._stream.write(message)
-        return self
-
-    def newline(self) -> Self:
-        self._stream.write('\n')
-        return self
-
-    # • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • • •
-
-    def trace(self, message: str) -> None:
-        self.write_grey(message).newline()
-
-    def detail(self, message: str) -> None:
-        self._stream.write(f'{message}\n')
-
-    def info(self, message: str) -> None:
-        self.write_bold(message).newline()
-
-    def success(self, message: str) -> None:
-        self._stream.write(f'{self.sgr(self.GREEN)}{message}{self.sgr(self.RESET)}')
-        self.newline()
-
-    def error(self, message: str) -> None:
-        self.write_red(message).newline()
-
-    def exception(self, x: Exception) -> None:
-        lines = traceback.format_exception(x)
-        for line in lines[:-1]:
-            self._stream.write(line)
-        self.write_red(lines[-1])
-
-
-@dataclass
-class Options:
-    console: Console
-    module_name: str = ''
-    verbose: bool = False
+from test.console import Console
 
 
 # ======================================================================================
 
-def main(options: Options) -> int:
+
+@dataclass
+class Options:
+    test_runner: str
+    console: Console
+    module_name: str = ''
+    verbose: bool = False
+
+    def make_verbose(self) -> None:
+        self.verbose = True
+        self.console.verbose = True
+
+    def test_command(self) -> list[str]:
+        command = [sys.executable, self.test_runner]
+        if self.verbose:
+            command.append('-v')
+        return command
+
+
+def run_tests(options: Options) -> int:
     console = options.console
     console.info("Getting started with Tsutsumu's test suite...")
     console.detail(f'Running "{sys.executable}"')
@@ -116,18 +64,13 @@ def main(options: Options) -> int:
         'test.cargo_extra',
     ):
         console.detail(f'╭──── {module}')
-        subprocess.run([
-            sys.executable,
-            TESTSCRIPT,
-            'run-test-module',
-            module,
-        ], check=True)
+        subprocess.run([*options.test_command(), 'run-test-module', module], check=True)
         console.detail('╰─╼')
 
     # ----------------------------------------------------------------------------------
 
     console.info('Testing ingestion from pyproject.toml...')
-    from tsutsumu.distribution.distinfo import DistInfo
+    from cargo.distinfo import DistInfo
 
     pyproject_path = Path('pyproject.toml').absolute()
     distinfo = DistInfo.from_pyproject(pyproject_path)
@@ -165,7 +108,7 @@ def main(options: Options) -> int:
             '-m', 'tsutsumu',
             '-o', str(cwd / 'bundles' / 'bundler.py'),
             '-r',
-            'tsutsumu'
+            'tsutsumu', 'cargo',
         ],
         check=True
     )
@@ -174,6 +117,11 @@ def main(options: Options) -> int:
     # ----------------------------------------------------------------------------------
 
     console.info('Running documentation tests...')
+
+    try:
+        sys.argv.remove('-v')
+    except:
+        pass
 
     # Since documentation test uses bundles/can.py, we regenerate it first.
     doc_failures, doc_tests = doctest.testfile(
@@ -296,13 +244,7 @@ def main(options: Options) -> int:
     # ----------------------------------------------------------------------------------
 
     console.info('Comparing repackaged Tsutsumu modules to originals...')
-    completion = subprocess.run([
-            sys.executable,
-            TESTSCRIPT,
-            'run-repackaged-module-test'
-        ],
-    )
-
+    completion = subprocess.run([*options.test_command(), 'run-repackaged-module-test'])
     if completion.returncode != 0:
         console.error('Repackaged modules differ from originals!')
         sys.exit(1)
@@ -316,12 +258,9 @@ def main(options: Options) -> int:
 
 # ======================================================================================
 
-def run_test_module(options: Options) -> int:
+def run_module_test(options: Options) -> int:
     console = options.console
     module = import_module(options.module_name)
-
-    null_logger = lambda _: None
-    default_logger = lambda msg: console.write('│   ').write_grey(f'{msg}').newline()
 
     errors = 0
     for key in dir(module):
@@ -332,20 +271,14 @@ def run_test_module(options: Options) -> int:
             continue
 
         console.detail(f'├─ {value.__name__}')
-        sig = inspect.signature(value)
+        with console.new_prefix('│   '):
+            try:
+                    value(options.console)
+            except Exception as x:
+                console.exception(x)
+                errors += 1
 
-        try:
-            if 'logger' in sig.parameters and 'debug' in sig.parameters:
-                value(logger=default_logger, debug=True)
-            elif 'logger' in sig.parameters:
-                value(logger=null_logger)
-            else:
-                value()
-        except Exception as x:
-            console.exception(x)
-            errors += 1
-
-    return bool(errors)
+    return bool(errors + console.failed_assertions)
 
 # --------------------------------------------------------------------------------------
 
@@ -398,26 +331,25 @@ def run_repackaged_module_test(options: Options) -> int:
 # --------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    TESTSCRIPT = sys.argv[0]
     try:
-        options = Options(Console(sys.stdout))
+        options = Options(sys.argv[0], Console(sys.stdout))
         console = options.console
 
-        fn = main
+        fn = run_tests
         module = None
         for arg in sys.argv[1:]:
             if arg == '-v':
-                options.verbose = True
+                options.make_verbose()
             elif arg == 'run-test-module':
-                fn = run_test_module
+                fn = run_module_test
             elif arg == 'run-repackaged-module-test':
                 fn = run_repackaged_module_test
-            elif fn == run_test_module and options.module_name == '':
+            elif fn == run_module_test and options.module_name == '':
                 options.module_name = arg
             else:
                 raise SystemExit(f'unrecognized command line argument "{arg}"')
 
-        if fn == run_test_module and options.module_name == '':
+        if fn == run_module_test and options.module_name == '':
             raise SystemExit('can\'t "run-test-module" without module name')
 
         sys.exit(fn(options))
