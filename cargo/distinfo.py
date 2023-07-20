@@ -13,11 +13,36 @@ from typing import cast, Literal, overload, TypeVar
 from packaging.markers import Marker as PackagingMarker
 from packaging.requirements import Requirement as PackagingRequirement
 
-from cargo.name import canonicalize
+from .name import canonicalize, today_as_version
+from .requirement import Requirement
 
-from .requirement import parse_requirement
-from .util import today_as_version
 
+# class Person(NamedTuple):
+#     name: str
+#     email: None | str
+#     url: None | str
+
+
+# class DistInfoData(NamedTuple):
+#     name: str
+#     version: None | str = None
+#     summary: None | str = None
+#     homepage: None | str = None
+#     download_url: None | str = None
+#     project_url: None | str = None
+#     keywords: tuple[str, ...] = ()
+#     classifiers: tuple[str, ...] = ()
+#     platforms: tuple[str, ...] = ()
+#     author: None | Person = None
+#     maintainer: None | Person = None
+#     license: None | str = None
+#     required_python: None | str = None
+#     required_dists: tuple[str, ...] = ()
+#     required_resources: tuple[str, ...] = ()
+#     provided_dists: tuple[str, ...] = ()
+#     provided_extras: tuple[str, ...] = ()
+#     obsoleted_dists: tuple[str,...] = ()
+#     provenance: tuple[str, ...] = ()
 
 __all__ = ("collect_dependencies", "DistInfo")
 
@@ -32,7 +57,7 @@ def collect_dependencies(
     never installed in the first place due to their marker evaluating to false.
     """
 
-    pyproject_path = Path.cwd() / "pyproject.toml"  # type: ignore[misc]
+    pyproject_path = Path.cwd() / "pyproject.toml"
     if pyproject_path.exists():
         distribution = DistInfo.from_pyproject(pyproject_path, pkgextras)
     else:
@@ -53,7 +78,7 @@ def collect_dependencies(
         # constraint on the operating system or Python runtime.
 
         pkgname, pkgextras, requirement = pending.pop()
-        dependency, dep_extras, _, only_for_extra = parse_requirement(requirement)
+        dependency, dep_extras, _, only_for_extra = Requirement.from_string(requirement)
 
         req = PackagingRequirement(requirement)
         if req.marker is not None:
@@ -62,7 +87,7 @@ def collect_dependencies(
                 not_installed[pkgname] = req.marker
                 continue  # since dependency hasn't been installed
         if only_for_extra is not None and only_for_extra not in pkgextras:
-            continue  # since requirement is for unused package extra
+            continue  # since requirement is for unused package
         if dependency in distributions:
             continue  # since dependency has already been processed
 
@@ -158,7 +183,7 @@ class DistInfo:
             if "version" in property("dynamic", list, True):
                 package = importlib.import_module(name)
                 version = getattr(package, "__version__")
-                assert isinstance(version, str)  # type: ignore[misc]  # due to Any
+                assert isinstance(version, str)
             else:
                 raise ValueError(f'"{path}" has no "version" in "project" section')
 

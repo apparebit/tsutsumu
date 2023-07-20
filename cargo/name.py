@@ -1,7 +1,8 @@
+import datetime
 import re
 
 
-__all__ = ('canonicalized',)
+__all__ = ('canonicalized', 'split_hash', 'today_as_version')
 
 
 _DASHING = re.compile(r'[-_.]+')
@@ -23,3 +24,7 @@ def split_hash(url: str) -> None | tuple[str, str, str]:
         return None
 
     return url, algo, value
+
+
+def today_as_version() -> str:
+    return '.'.join(str(part) for part in datetime.date.today().isocalendar())
